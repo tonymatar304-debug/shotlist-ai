@@ -71,6 +71,13 @@ export default {
         if(!d.id||!attr.url)return err("Upload ticket unavailable",502,origin);
         return json({id:d.id,uploadUrl:attr.url,expires:attr.expires},200,headers);
       }
+      if(url.pathname==="/api/source-status"&&request.method==="GET"){
+        const id=url.searchParams.get("id");
+        if(!id||!SOURCE_ID.test(id))return err("Invalid source ID",400,origin);
+        const response=await provider(INGEST,"/sources/"+encodeURIComponent(id),env);
+        const a=response.data?.attributes||{};
+        return json({id,status:a.status||"unknown",duration:Number(a.duration)||null,error:a.status==="failed"?"Source processing failed":null},200,headers);
+      }
       if(url.pathname==="/api/render"&&request.method==="POST"){
         const body=await request.json();
         const ids=body?.sourceIds;
