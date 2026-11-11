@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CLAQE — Private Cloud Rendering Test</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0c0e;--p:#191b21;--text:#f0f0ef;--muted:#a6a9b3;--accent:#86bfcc}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--text);font:16px/1.5 system-ui,sans-serif;margin:0}
+main{width:min(680px,100%);padding:26px 20px 80px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:45px}
+.logo{font-weight:800;font-size:28px;letter-spacing:-.055em}.logo span{color:var(--accent)}
+small,.muted{color:var(--muted)}.tag{font-size:12px;border:1px solid #474a54;padding:5px 9px;border-radius:20px}
+h1{font:normal clamp(36px,8vw,58px)/1.08 Georgia,serif;margin:0 0 14px}
+h2{font-size:16px;font-weight:600;margin:30px 0 12px}
+input,select,button{font:inherit}
+input[type=text],input[type=password]{width:100%;border:1px solid #393d47;background:var(--p);color:var(--text);padding:13px 14px;border-radius:12px;margin:5px 0 12px}
+.file{display:block;border:1px dashed #5f6974;text-align:center;padding:25px 12px;background:var(--p);border-radius:16px;cursor:pointer}
+.file input{display:block;margin:10px auto 0;max-width:240px}
+#list{list-style:none;padding:0;display:grid;gap:9px}#list li{display:flex;align-items:center;gap:10px;border:1px solid #33363f;padding:11px;border-radius:10px}
+#list span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#list button{font-size:12px;padding:6px 10px;background:#242831;color:white;border:1px solid #424650;border-radius:8px}
+fieldset{border:0;padding:0;margin:0;display:flex;gap:8px;flex-wrap:wrap}
+.choice{background:var(--p);color:var(--text);border:1px solid #414550;border-radius:11px;padding:12px 15px;cursor:pointer}
+.choice[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+.primary{background:var(--accent);color:#111819;border:0;border-radius:13px;padding:15px;width:100%;margin-top:28px;font-weight:700;cursor:pointer}
+.primary:disabled{opacity:.4;cursor:not-allowed}
+#status{white-space:pre-wrap;overflow-wrap:anywhere;padding:15px;margin-top:20px;border:1px solid #373b44;border-radius:12px;color:var(--muted);background:var(--p)}
+#result{display:none;margin-top:24px}video{width:100%;background:black;border-radius:12px;max-height:520px}
+#download{display:block;text-align:center;background:var(--accent);color:#101819;padding:13px;margin-top:13px;border-radius:11px;text-decoration:none;font-weight:700}
+.warning{border-left:3px solid #e6b676;padding:10px 14px;color:#c0c4cd;font-size:13px;background:#232024;margin-top:25px}
+</style></head><body>
+<main><header><div class="logo">claqe<span>.</span></div><div class="tag">PRIVATE CLOUD TEST</div></header>
+<h1>Make a film in the cloud.</h1>
+<p class="muted">Upload ordinary phone footage. CLAQE's test server will assemble a real, short MP4. This is an engineering proof, not the final AI editing experience.</p>
+<h2>Connect the private test</h2>
+<label for="worker">Development Worker URL</label>
+<input id="worker" type="text" spellcheck="false" placeholder="https://claqe-render-dev.your-account.workers.dev">
+<label for="token">Development access token</label>
+<input id="token" type="password" placeholder="Only the project owner should know this">
+<h2>Choose your clips</h2>
+<label class="file">Choose 2–4 videos together, or add them individually.<input id="files" type="file" accept="video/*,.mov,.mp4,.m4v,.webm" multiple></label>
+<ul id="list"></ul><small>Dev test limit: 4 clips and up to 500 MB per clip. Originals leave your phone and are stored by the rendering provider.</small>
+<h2>Film style</h2>
+<fieldset id="styles">
+<button type="button" data-style="cinematic" class="choice" aria-pressed="true">Cinematic</button>
+<button type="button" data-style="dynamic" class="choice" aria-pressed="false">Dynamic</button>
+<button type="button" data-style="vintage" class="choice" aria-pressed="false">Vintage</button>
+</fieldset>
+<h2>Video format</h2>
+<fieldset id="formats"><button type="button" data-format="vertical" class="choice" aria-pressed="true">Vertical 9:16</button><button type="button" data-format="wide" class="choice" aria-pressed="false">Wide 16:9</button></fieldset>
+<button id="create" class="primary" type="button" disabled>Upload &amp; create film</button>
+<div id="status" role="status" aria-live="polite">Choose your clips and enter your private test credentials.</div>
+<div id="result"><h2>Your rendered film</h2><video id="preview" controls playsinline></video><a id="download" download="claqe-cloud-test.mp4">Download finished MP4</a></div>
+<div class="warning">Private test only. Shotstack's Ingest API stores source footage under hard-to-guess but publicly reachable URLs; don't upload confidential clips. This prototype needs a provider sandbox key, has no public billing or account management, and uses fixed effects rather than content-aware AI. Don't put your dev token in public code.</div>
+</main><script>
+"use strict";
+(()=> {
+  const el=id=>document.getElementById(id);
+  let files=[],style="cinematic",format="vertical",busy=false;
+  const say=t=>{el("status").textContent=t};
+  const size=files=>files.reduce((n,f)=>n+f.size,0);
+  function update(){
+    el("create").disabled=busy||files.length<2||!el("worker").value.trim()||!el("token").value.trim();
+    el("list").replaceChildren();
+    files.forEach((f,i)=>{
+      const li=document.createElement("li"),name=document.createElement("span"),remove=document.createElement("button");
+      name.textContent=f.name+" · "+(f.size/1048576).toFixed(1)+" MB";remove.textContent="Remove";remove.disabled=busy;
+      remove.onclick=()=>{files.splice(i,1);update()};
+      li.append(name,remove);el("list").append(li);
+    });
+  }
+  el("worker").addEventListener("input",update);el("token").addEventListener("input",update);
+  el("files").addEventListener("change",e=>{
+    const next=Array.from(e.target.files||[]);e.target.value="";
+    if(!next.length)return;
+    if(files.length+next.length>4)return say("Maximum 4 clips for this private test.");
+    if(next.some(f=>f.size>500*1048576))return say("One clip exceeds the 500 MB development limit.");
+    const existing=new Set(files.map(f=>f.name+":"+f.size+":"+f.lastModified));
+    files.push(...next.filter(f=>!existing.has(f.name+":"+f.size+":"+f.lastModified)));
+    update();say(files.length+" clips selected · "+(size(files)/1048576).toFixed(1)+" MB");
+  });
+  for(const [target,attribute,cb] of [["styles","style",v=>style=v],["formats","format",v=>format=v]]){
+    el(target).onclick=e=>{
+      const btn=e.target.closest("button[data-"+attribute+"]");if(!btn)return;
+      for(const b of el(target).querySelectorAll("button"))b.setAttribute("aria-pressed",String(b===btn));
+      cb(btn.dataset[attribute]);
+    };
+  }
+  async function call(path,method="GET",payload){
+    const root=el("worker").value.trim().replace(/\/+$/,"");
+    if(!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(root))throw Error("Invalid Worker URL. Use https://.");
+    const res=await fetch(root+path,{method,headers:{"X-CLAQE-DEV-TOKEN":el("token").value,...(payload?{"Content-Type":"application/json"}:{})},body:payload?JSON.stringify(payload):undefined});
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok)throw Error(data.error||"Server error "+res.status);
+    return data;
+  }
+  const pause=ms=>new Promise(r=>setTimeout(r,ms));
+  async function sourceReady(id){
+    for(let retry=0;retry<60;retry++){
+      const state=await call("/api/source-status?id="+encodeURIComponent(id));
+      if(state.status==="ready")return;
+      if(state.status==="failed")throw Error("Video ingest failed.");
+      await pause(3000);
+    }
+    throw Error("Upload processing timed out; retry later.");
+  }
+  async function renderReady(id){
+    for(let retry=0;retry<90;retry++){
+      const state=await call("/api/status?id="+encodeURIComponent(id));
+      if(state.status==="done"&&state.videoUrl)return state.videoUrl;
+      if(["failed","cancelled"].includes(state.status))throw Error(state.error||"Render failed");
+      say("CLAQE is rendering your film in the cloud… "+state.status);
+      await pause(4000);
+    }
+    throw Error("Render still processing. It may complete later.");
+  }
+  el("create").onclick=async ()=>{
+    if(busy||files.length<2)return;
+    busy=true;update();el("result").style.display="none";
+    try{
+      const ids=[];
+      for(let i=0;i<files.length;i++){
+        const f=files[i];say("Preparing secure upload "+(i+1)+" of "+files.length+"…");
+        const ticket=await call("/api/upload-ticket","POST",{filename:f.name,size:f.size});
+        say("Uploading clip "+(i+1)+" of "+files.length+" ("+(f.size/1048576).toFixed(0)+" MB)…");
+        const put=await fetch(ticket.uploadUrl,{method:"PUT",body:f});
+        if(!put.ok)throw Error("Upload "+(i+1)+" failed: HTTP "+put.status+". Signed upload URL CORS may need provider support.");
+        ids.push(ticket.id);
+        say("Processing clip "+(i+1)+" of "+files.length+"…");
+        await sourceReady(ticket.id);
+      }
+      say("Sending film to cloud renderer…");
+      const render=await call("/api/render","POST",{sourceIds:ids,style,format});
+      const url=await renderReady(render.id);
+      el("preview").src=url;el("download").href=url;el("result").style.display="block";
+      say("Film ready! Cloud-rendered MP4. Check output and watermark before proceeding.");
+      el("result").scrollIntoView({behavior:"smooth",block:"start"});
+    }catch(e){say("Test failed: "+(e.message||String(e)))}
+    finally{busy=false;update()}
+  };
+  update();
+})();
+</script></body></html>
