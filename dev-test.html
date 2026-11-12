@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claqe dev test — /generate</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<style>
+  body{background:#0b0c0e;color:#eceae4;font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:30px auto;padding:0 16px}
+  h1{font-size:20px}
+  label{display:block;margin:14px 0 4px;color:#a8a8a0;font-size:13px}
+  input,select{width:100%;background:#17191e;color:#fff;border:1px solid #333;border-radius:8px;padding:8px}
+  .row{display:flex;gap:8px}
+  .row > *{flex:1}
+  button{margin-top:16px;background:#86bfcc;color:#0b0c0e;border:0;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  pre{background:#17191e;border:1px solid #333;border-radius:8px;padding:12px;white-space:pre-wrap;word-break:break-word;margin-top:16px;font-size:13px}
+  .clip{border:1px solid #333;border-radius:8px;padding:10px;margin-top:8px}
+</style>
+</head>
+<body>
+<h1>claqe — dev test (/pass + /generate)</h1>
+<p>Worker: <code id="base">https://shotlist-api-dev.tonymatar304.workers.dev</code></p>
+
+<div class="cf-turnstile" data-sitekey="0x4AAAAAAF8-xqvui6vubcqJ" data-callback="onTurnstileSuccess"></div>
+<button id="getpass" disabled>1. Get pass (verifies you're human)</button>
+
+<h2 style="margin-top:28px;font-size:16px">Sample clips</h2>
+<div id="clips"></div>
+
+<label>Style</label>
+<select id="style">
+  <option value="cinematic">Cinematic</option>
+  <option value="dynamic">Dynamic</option>
+  <option value="vintage">Vintage</option>
+</select>
+
+<label>Target total seconds (max 30 for Free)</label>
+<input id="target" type="number" value="30" min="5" max="30">
+
+<button id="generate" disabled>2. Generate plan (real Claude call)</button>
+<button id="status">Check /status</button>
+
+<pre id="out">Waiting…</pre>
