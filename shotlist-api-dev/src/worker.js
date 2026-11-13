@@ -63,6 +63,23 @@ async function getSettings(db) {
   for (const row of results) s[row.key] = row.value;
   return s;
 }
+async function ensureUser(db, uid) {
+  await db.prepare("INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)").bind(uid, Date.now()).run();
+  return await db.prepare("SELECT plan, status FROM users WHERE id = ?").bind(uid).first();
+}
+// Successful generations (ok or fallback) this UTC month; failed upstream calls are never logged, so never counted.
+async function monthlyUsage(db, uid) {
+  const d = new Date();
+  const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM usage_log WHERE user_id = ? AND ts >= ? AND status IN ('ok','fallback')")
+    .bind(uid, monthStart).first();
+  return row ? row.n : 0;
+}
+// null = no per-user cap configured (the global budget cap still applies).
+function freeLimitOf(settings) {
+  const n = parseInt(settings.free_monthly_limit, 10);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
 async function checkAndIncrementLimit(db, key, limit) {
   const windowStart = Math.floor(Date.now() / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS;
   const row = await db.prepare(
@@ -121,11 +138,12 @@ function validatePlan(plan, clips, targetSeconds) {
   if (total > targetSeconds + 1.5) return false;
   return true;
 }
-async function callClaude(apiKey, clips, style, targetSeconds) {
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+async function callClaude(apiKey, clips, style, targetSeconds, apiUrl) {
   const clipList = clips.map((c, i) => `${i}: ${c.duration.toFixed(1)}s long`).join("\n");
   const prompt = `You are editing a short ${style} film from these raw clips (metadata only, you cannot see the footage):\n${clipList}\n\nDecide the play order, a start time and a duration for each clip. Rules:\n- Every clip index 0 to ${clips.length - 1} appears exactly once.\n- start + duration must not exceed that clip's own length.\n- Each duration is at least 1 second.\n- The total of all durations must not exceed ${targetSeconds} seconds.\n- Vary durations naturally rather than splitting evenly, fitting the "${style}" feel (cinematic = slower, longer holds; dynamic = short punchy cuts with variation; vintage = medium, slightly uneven pacing).\n\nReply with ONLY this JSON shape, nothing else, no code fences, no commentary:\n{"order":[{"index":0,"start":0,"duration":4.5}]}`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(apiUrl || ANTHROPIC_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -182,6 +200,7 @@ export default {
         const passed = await verifyTurnstile(turnstileToken, env.TURNSTILE_SECRET, ip);
         if (!passed) return reply({ ok: false, error: "Human verification failed. Please try again." }, 403);
         const { token, uid, exp } = await issuePass(env.PASS_SECRET);
+        await ensureUser(env.DB, uid);
         return reply(
           { ok: true, message: "Pass issued.", uid, expires: new Date(exp * 1000).toISOString() },
           200,
@@ -194,8 +213,11 @@ export default {
         const settings = await getSettings(env.DB);
         const dUsed = await ledgerValue(env.DB, dailyPeriod());
         const mUsed = await ledgerValue(env.DB, monthlyPeriod());
+        const freeLimit = freeLimitOf(settings);
+        const free = pass && freeLimit !== null ? { used: await monthlyUsage(env.DB, pass.uid), limit: freeLimit } : undefined;
         return reply({
           ok: true,
+          free,
           pass: pass ? { uid: pass.uid, valid: true } : { valid: false, message: "No valid pass. Visit /pass first." },
           ai_enabled: settings.ai_enabled === "1",
           budget: { daily_used: dUsed.toFixed(4), daily_limit: settings.daily_budget_usd, monthly_used: mUsed.toFixed(4), monthly_limit: settings.monthly_budget_usd }
@@ -211,14 +233,15 @@ export default {
 
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
         const ipHash = await sha256hex(ip);
-        const passLimit = await checkAndIncrementLimit(env.DB, "pass:" + pass.uid, PASS_LIMIT);
+        // IP limit counts every request (including malformed ones) as abuse protection.
         const ipLimitRes = await checkAndIncrementLimit(env.DB, "ip:" + ipHash, IP_LIMIT);
-        if (!passLimit.allowed || !ipLimitRes.allowed) {
+        if (!ipLimitRes.allowed) {
           return reply({ ok: false, error: "Rate limit reached. Try again later." }, 429);
         }
 
         let body;
         try { body = await request.json(); } catch { return reply({ ok: false, error: "Invalid request." }, 400); }
+        if (!body || typeof body !== "object") return reply({ ok: false, error: "Invalid request." }, 400);
         const clips = Array.isArray(body.clips) ? body.clips : [];
         const style = STYLES.includes(body.style) ? body.style : "cinematic";
         const targetSeconds = Math.min(FREE_MAX_SECONDS, Math.max(5, Number(body.targetSeconds) || FREE_MAX_SECONDS));
@@ -227,9 +250,23 @@ export default {
           return reply({ ok: false, error: `Select between 2 and ${FREE_MAX_CLIPS} clips.` }, 400);
         }
         for (const c of clips) {
-          if (typeof c.duration !== "number" || c.duration < 1 || c.duration > 300) {
+          if (!c || typeof c.duration !== "number" || !Number.isFinite(c.duration) || c.duration < 1 || c.duration > 300) {
             return reply({ ok: false, error: "Each clip needs a valid duration." }, 400);
           }
+        }
+
+        // Per-user monthly quota (users.plan / users.status / settings.free_monthly_limit). Checked after validation.
+        const user = await ensureUser(env.DB, pass.uid);
+        if (user.status !== "active") return reply({ ok: false, error: "This account is not active." }, 403);
+        const freeLimit = freeLimitOf(settings);
+        if (user.plan === "free" && freeLimit !== null && (await monthlyUsage(env.DB, pass.uid)) >= freeLimit) {
+          return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
+        }
+
+        // The user's generation allowance is only charged for well-formed requests.
+        const passLimit = await checkAndIncrementLimit(env.DB, "pass:" + pass.uid, PASS_LIMIT);
+        if (!passLimit.allowed) {
+          return reply({ ok: false, error: "Rate limit reached. Try again later." }, 429);
         }
 
         const dPeriod = dailyPeriod(), mPeriod = monthlyPeriod();
@@ -243,7 +280,8 @@ export default {
 
         let order, usage, usedFallback = false, status = "ok";
         try {
-          const result = await callClaude(env.ANTHROPIC_API_KEY, clips, style, targetSeconds);
+          // ANTHROPIC_API_URL is only set in local tests (mock server); production uses the default.
+          const result = await callClaude(env.ANTHROPIC_API_KEY, clips, style, targetSeconds, env.ANTHROPIC_API_URL);
           usage = result.usage;
           if (validatePlan(result.order, clips, targetSeconds)) {
             order = result.order;
