@@ -1,0 +1,14 @@
+{
+  "name": "claqe-frontend-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"*.test.js\" \"e2e/*.test.mjs\"",
+    "unit": "node --test \"*.test.js\"",
+    "e2e": "node --test --test-concurrency=1 \"e2e/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "playwright-core": "^1.65.0"
+  }
+}

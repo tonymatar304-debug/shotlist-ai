@@ -75,10 +75,10 @@ async function monthlyUsage(db, uid) {
     .bind(uid, monthStart).first();
   return row ? row.n : 0;
 }
-// null = no per-user cap configured (the global budget cap still applies).
+// Returns a non-negative integer, or null when missing/invalid. Callers MUST fail closed on null for free users.
 function freeLimitOf(settings) {
-  const n = parseInt(settings.free_monthly_limit, 10);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+  const v = String(settings.free_monthly_limit ?? "").trim();
+  return /^[0-9]{1,6}$/.test(v) ? Number(v) : null;
 }
 async function checkAndIncrementLimit(db, key, limit) {
   const windowStart = Math.floor(Date.now() / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS;
@@ -183,7 +183,7 @@ export default {
     const reply = (body, status = 200, extraHeaders = {}) =>
       new Response(JSON.stringify(body, null, 2), { status, headers: { ...headers, ...extraHeaders } });
 
-    if (origin && origin !== ALLOWED_ORIGIN) return reply({ ok: false, error: "Origin not allowed" }, 403);
+    if (origin && origin !== ALLOWED_ORIGIN) return reply({ ok: false, code: "origin_not_allowed", error: "Origin not allowed" }, 403);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
 
     try {
@@ -198,7 +198,7 @@ export default {
         }
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
         const passed = await verifyTurnstile(turnstileToken, env.TURNSTILE_SECRET, ip);
-        if (!passed) return reply({ ok: false, error: "Human verification failed. Please try again." }, 403);
+        if (!passed) return reply({ ok: false, code: "verification_failed", error: "Human verification failed. Please try again." }, 403);
         const { token, uid, exp } = await issuePass(env.PASS_SECRET);
         await ensureUser(env.DB, uid);
         return reply(
@@ -217,6 +217,7 @@ export default {
         const free = pass && freeLimit !== null ? { used: await monthlyUsage(env.DB, pass.uid), limit: freeLimit } : undefined;
         return reply({
           ok: true,
+          quota_configured: freeLimit !== null,
           free,
           pass: pass ? { uid: pass.uid, valid: true } : { valid: false, message: "No valid pass. Visit /pass first." },
           ai_enabled: settings.ai_enabled === "1",
@@ -226,47 +227,50 @@ export default {
 
       if (url.pathname === "/generate") {
         const pass = await verifyPass(getCookie(request, "slai_pass"), env.PASS_SECRET);
-        if (!pass) return reply({ ok: false, error: "No valid pass. Visit /pass first, then retry." }, 401);
+        if (!pass) return reply({ ok: false, code: "pass_required", error: "No valid pass. Visit /pass first, then retry." }, 401);
 
         const settings = await getSettings(env.DB);
-        if (settings.ai_enabled !== "1") return reply({ ok: false, error: "Generation is currently disabled." }, 403);
+        if (settings.ai_enabled !== "1") return reply({ ok: false, code: "ai_disabled", error: "Generation is currently disabled." }, 403);
 
         const ip = request.headers.get("CF-Connecting-IP") || "unknown";
         const ipHash = await sha256hex(ip);
         // IP limit counts every request (including malformed ones) as abuse protection.
         const ipLimitRes = await checkAndIncrementLimit(env.DB, "ip:" + ipHash, IP_LIMIT);
         if (!ipLimitRes.allowed) {
-          return reply({ ok: false, error: "Rate limit reached. Try again later." }, 429);
+          return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
         }
 
         let body;
-        try { body = await request.json(); } catch { return reply({ ok: false, error: "Invalid request." }, 400); }
-        if (!body || typeof body !== "object") return reply({ ok: false, error: "Invalid request." }, 400);
+        try { body = await request.json(); } catch { return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400); }
+        if (!body || typeof body !== "object") return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400);
         const clips = Array.isArray(body.clips) ? body.clips : [];
         const style = STYLES.includes(body.style) ? body.style : "cinematic";
         const targetSeconds = Math.min(FREE_MAX_SECONDS, Math.max(5, Number(body.targetSeconds) || FREE_MAX_SECONDS));
 
         if (clips.length < 2 || clips.length > FREE_MAX_CLIPS) {
-          return reply({ ok: false, error: `Select between 2 and ${FREE_MAX_CLIPS} clips.` }, 400);
+          return reply({ ok: false, code: "invalid_request", error: `Select between 2 and ${FREE_MAX_CLIPS} clips.` }, 400);
         }
         for (const c of clips) {
           if (!c || typeof c.duration !== "number" || !Number.isFinite(c.duration) || c.duration < 1 || c.duration > 300) {
-            return reply({ ok: false, error: "Each clip needs a valid duration." }, 400);
+            return reply({ ok: false, code: "invalid_request", error: "Each clip needs a valid duration." }, 400);
           }
         }
 
         // Per-user monthly quota (users.plan / users.status / settings.free_monthly_limit). Checked after validation.
         const user = await ensureUser(env.DB, pass.uid);
-        if (user.status !== "active") return reply({ ok: false, error: "This account is not active." }, 403);
+        if (user.status !== "active") return reply({ ok: false, code: "account_inactive", error: "This account is not active." }, 403);
         const freeLimit = freeLimitOf(settings);
-        if (user.plan === "free" && freeLimit !== null && (await monthlyUsage(env.DB, pass.uid)) >= freeLimit) {
+        if (user.plan === "free" && freeLimit === null) {
+          return reply({ ok: false, code: "quota_unconfigured", error: "Generation is temporarily unavailable." }, 503);
+        }
+        if (user.plan === "free" && (await monthlyUsage(env.DB, pass.uid)) >= freeLimit) {
           return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
         }
 
         // The user's generation allowance is only charged for well-formed requests.
         const passLimit = await checkAndIncrementLimit(env.DB, "pass:" + pass.uid, PASS_LIMIT);
         if (!passLimit.allowed) {
-          return reply({ ok: false, error: "Rate limit reached. Try again later." }, 429);
+          return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
         }
 
         const dPeriod = dailyPeriod(), mPeriod = monthlyPeriod();
@@ -274,9 +278,9 @@ export default {
         const monthlyLimit = parseFloat(settings.monthly_budget_usd || "0");
 
         const dOk = await reserve(env.DB, dPeriod, EST_COST, dailyLimit);
-        if (!dOk) return reply({ ok: false, error: "Daily budget cap reached." }, 402);
+        if (!dOk) return reply({ ok: false, code: "budget_daily", error: "Daily budget cap reached." }, 402);
         const mOk = await reserve(env.DB, mPeriod, EST_COST, monthlyLimit);
-        if (!mOk) { await release(env.DB, dPeriod, EST_COST); return reply({ ok: false, error: "Monthly budget cap reached." }, 402); }
+        if (!mOk) { await release(env.DB, dPeriod, EST_COST); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
 
         let order, usage, usedFallback = false, status = "ok";
         try {
@@ -293,7 +297,7 @@ export default {
           console.error(err);
           await release(env.DB, dPeriod, EST_COST);
           await release(env.DB, mPeriod, EST_COST);
-          return reply({ ok: false, error: "The AI editor is temporarily unavailable. Please try again." }, 502);
+          return reply({ ok: false, code: "ai_unavailable", error: "The AI editor is temporarily unavailable. Please try again." }, 502);
         }
 
         const inTok = usage?.input_tokens || 0;

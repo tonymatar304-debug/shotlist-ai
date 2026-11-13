@@ -10,7 +10,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=Unbounded:wght@700;800&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#0c0e11;--panel:#17191e;--muted:#a1a6b2;--text:#f5f5f0;--line:#30333b;--accent:#86bfcc}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Instrument Sans",system-ui,sans-serif}
+[hidden]{display:none!important}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Instrument Sans",system-ui,sans-serif}
 main{width:min(760px,100%);margin:0 auto;padding:28px 20px 96px}
 header{display:flex;align-items:center;justify-content:space-between;margin-bottom:70px}
 .brand{display:flex;align-items:center;gap:9px;font-family:"Unbounded",system-ui,sans-serif;font-weight:800;font-size:23px;letter-spacing:-.025em;line-height:1.2}.brand svg{width:31px;height:31px;flex-shrink:0}.brand span span{color:var(--accent)}
@@ -43,7 +43,9 @@ label.label{font-size:13px;font-weight:600;letter-spacing:.04em;text-transform:u
 footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:var(--muted);font-size:13px}
 @media(max-width:540px){header{margin-bottom:48px}.styles{grid-template-columns:1fr}.style{text-align:left;padding:12px 15px}.row>*{flex:1}}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/umd/ffmpeg.js"></script>
+<script src="vendor/ffmpeg/ffmpeg.js"></script>
+<script src="claqe-config.js"></script>
+<script src="claqe-api.js"></script>
 </head>
 <body>
 <main>
@@ -70,6 +72,15 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <button type="button" class="choice" data-format="landscape" aria-pressed="false">Wide · 16:9</button>
 </div>
 </section>
+<section class="section" id="aiBox" hidden>
+<label class="label">Edit plan</label>
+<div class="row" id="planMode">
+<button type="button" class="choice" data-plan="preview" aria-pressed="true">Browser preview · no AI</button>
+<button type="button" class="choice" data-plan="ai" aria-pressed="false">AI edit plan · beta</button>
+</div>
+<p class="smallnote" id="aiNote">The AI plan chooses the order and length of your cuts from clip lengths only. It can't see your footage yet.</p>
+<div id="turnstileBox" hidden></div>
+</section>
 <button type="button" class="primary" id="create" disabled>Create my film</button>
 <p class="smallnote">An early preview of CLAQE. Clips stay in your browser; the current render is silent and uses basic editing effects. Footage-aware AI is still in development.</p>
 <div id="status" class="status" role="status" aria-live="polite">Select your clips to begin.</div>
@@ -77,7 +88,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <h2 style="font:normal 30px 'Instrument Serif',serif;margin:0 0 15px">Your film is ready.</h2>
 <video id="preview" controls playsinline></video>
 <a id="download" download="claqe-first-film.mp4">Download MP4</a>
-<p class="smallnote">Preview export · the CLAQE watermark is embedded in the video.</p>
+<p class="smallnote" id="resultNote">Preview export · the CLAQE watermark is embedded in the video.</p>
 </div>
 <footer>CLAQE is evolving. This early studio demonstrates actual MP4 processing and is not yet the full AI filmmaker. Music, intelligent shot selection and creative remixing are in development. Please use short test clips.</footer>
 </main>
@@ -85,7 +96,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 "use strict";
 (function(){
   const $ = id => document.getElementById(id);
-  const state = {clips:[],style:"cinematic",format:"vertical",busy:false,ff:null,outputURL:null,blobURLs:[]};
+  const state = {clips:[],style:"cinematic",format:"vertical",plan:"preview",busy:false,ff:null,outputURL:null,blobURLs:[],tsWait:null};
   const maxFiles = 10;
   const maxSize = 250*1024*1024;
   const maxTotal = 750*1024*1024;
@@ -93,7 +104,6 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   const renderMaxTotal = 180*1024*1024;
   const ffmpegVersion = "0.12.15";
   const coreVersion = "0.12.10";
-  const ffBase = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@" + ffmpegVersion + "/dist/umd";
   const coreBase = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@" + coreVersion + "/dist/umd";
   const setStatus = (message,error=false) => {
     $("status").textContent = message;
@@ -199,10 +209,10 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     ff.on("log",({message})=>{
       if(/Error|Invalid|failed|not found|Unknown encoder/i.test(message))lastError=message.slice(0,200);
     });
-    const classWorkerURL=await blobURL(ffBase+"/814.ffmpeg.js","text/javascript");
     const coreURL=await blobURL(coreBase+"/ffmpeg-core.js","text/javascript");
     const wasmURL=await blobURL(coreBase+"/ffmpeg-core.wasm","application/wasm");
-    await ff.load({classWorkerURL,coreURL,wasmURL});
+    // No classWorkerURL: the same-origin vendor/ffmpeg/814.ffmpeg.js runs as a classic worker, which can importScripts() the core blob.
+    await ff.load({coreURL,wasmURL});
     state.ff=ff;
     state.lastError=()=>lastError;
     return ff;
@@ -238,7 +248,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     for(let i=0;i<plan.length;i++){
       const item=plan[i],fadeOut=Math.max(.1,item.duration-.22).toFixed(2);
       const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
-      segments.push("["+i+":v]trim=start="+item.start+":duration="+item.duration+",setpts=PTS-STARTPTS,fps=24,"+
+      segments.push("["+(item.src===undefined?i:item.src)+":v]trim=start="+item.start+":duration="+item.duration+",setpts=PTS-STARTPTS,fps=24,"+
         "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
         "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
         "eq="+grades[state.style]+",fade=t=in:st=0:d=0.2,fade=t=out:st="+fadeOut+
@@ -249,15 +259,117 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
   }
+  // ---- Optional AI edit plan (claqe-api.js). Without a configured API the browser preview works unchanged. ----
+  const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
+  const apiBase=window.ClaqeAPI?ClaqeAPI.resolveBase({configured:window.CLAQE_API_BASE,search:location.search,hostname:location.hostname}):null;
+  const siteKey=window.CLAQE_TURNSTILE_SITEKEY||(isLocal?new URLSearchParams(location.search).get("tskey"):"")||"";
+  const aiEnabled=!!(apiBase&&siteKey);
+  const api=aiEnabled?ClaqeAPI.createClient({baseUrl:apiBase}):null;
+  let tsWidget=null,tsLoading=null;
+  const setAINote=t=>{$("aiNote").textContent=t};
+  function loadTurnstile(){
+    if(window.turnstile)return Promise.resolve(window.turnstile);
+    if(tsLoading)return tsLoading;
+    tsLoading=new Promise((resolve,reject)=>{
+      const s=document.createElement("script");s.async=true;
+      s.src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+      s.onload=()=>window.turnstile?resolve(window.turnstile):reject(new Error("x"));
+      s.onerror=()=>{tsLoading=null;reject(new Error("x"))};
+      document.head.append(s);
+    });
+    return tsLoading;
+  }
+  const settleToken=(fn,arg)=>{const w=state.tsWait;state.tsWait=null;if(w)w[fn](arg)};
+  async function requestToken(){
+    // Arm cancellation first so "Browser preview" works even while the Turnstile script is still loading.
+    const result=new Promise((resolve,reject)=>{state.tsWait={resolve,reject}});
+    result.catch(()=>{});
+    let ts;
+    try{ts=await loadTurnstile()}catch(_){state.tsWait=null;throw new Error("Couldn't load the human check. Check your connection and try again.")}
+    if(!state.tsWait)return result; // cancelled while loading
+    $("turnstileBox").hidden=false;
+    if(tsWidget===null){
+      tsWidget=ts.render("#turnstileBox",{
+        sitekey:siteKey,
+        callback:t=>settleToken("resolve",t),
+        "expired-callback":()=>setStatus("The human check expired. Please complete it again.",true),
+        "timeout-callback":()=>setStatus("The human check timed out. Please complete it again.",true),
+        "error-callback":()=>settleToken("reject",new Error("The human check couldn't complete. Reload the page or try another browser."))
+      });
+    }else ts.reset(tsWidget);
+    return result;
+  }
+  function closeToken(){$("turnstileBox").hidden=true;if(window.turnstile&&tsWidget!==null)try{window.turnstile.reset(tsWidget)}catch(_){}}
+  // Returns a /status result with a valid pass, or {ok:false,message}.
+  async function ensureAccess(){
+    setStatus("Checking AI access…");
+    let s=await api.status();
+    if(!s.ok)return s;
+    for(let attempt=0;attempt<2&&!(s.data.pass&&s.data.pass.valid);attempt++){
+      setStatus(attempt?ClaqeAPI.MESSAGES.verification_failed.text+" Please complete the check below again.":"Please complete the human check below to use AI editing.",attempt>0);
+      let token;
+      try{token=await requestToken()}catch(e){closeToken();return {ok:false,message:e.message}}
+      const p=await api.pass(token);
+      closeToken();
+      if(p.ok){
+        s=await api.status();
+        if(s.ok&&!(s.data.pass&&s.data.pass.valid))return {ok:false,message:"Your browser blocked the CLAQE verification cookie. Allow cookies for CLAQE or use the browser preview."};
+        break;
+      }
+      if(p.code!=="verification_failed")return p;
+    }
+    return s.ok&&!(s.data.pass&&s.data.pass.valid)?{ok:false,message:ClaqeAPI.MESSAGES.verification_failed.text}:s;
+  }
+  function usablePlan(order,count){
+    if(!Array.isArray(order)||order.length!==count)return null;
+    const seen=new Set();
+    for(const o of order){
+      if(!o||!Number.isInteger(o.index)||o.index<0||o.index>=count||seen.has(o.index))return null;
+      if(!Number.isFinite(o.start)||!Number.isFinite(o.duration)||o.start<0||o.duration<=0)return null;
+      seen.add(o.index);
+    }
+    return order.map(o=>({src:o.index,start:Math.round(o.start*10)/10,duration:Math.round(o.duration*10)/10}));
+  }
+  async function getAIPlan(){
+    const fail=m=>{setStatus(m+"\nChoose \u201cBrowser preview\u201d to make a film without AI.",true);return null};
+    const access=await ensureAccess();
+    if(!access.ok)return fail(access.message);
+    const d=access.data;
+    setAINote(ClaqeAPI.describeQuota(d));
+    if(d.ai_enabled===false)return fail(ClaqeAPI.MESSAGES.ai_disabled.text);
+    if(d.quota_configured===false||!d.free)return fail(ClaqeAPI.MESSAGES.quota_unconfigured.text);
+    if(d.free.used>=d.free.limit)return fail(ClaqeAPI.MESSAGES.free_limit.text);
+    setStatus("The AI editor is planning your cuts…");
+    const g=await api.generate({clips:state.clips,style:state.style,targetSeconds:22});
+    api.status().then(r=>{if(r.ok)setAINote(ClaqeAPI.describeQuota(r.data))});
+    if(!g.ok)return fail(g.message);
+    const plan=usablePlan(g.plan&&g.plan.order,state.clips.length);
+    if(!plan)return fail("The AI plan wasn't usable. A free edit may have been used; please try again.");
+    return {plan,source:g.source};
+  }
+  if(aiEnabled)$("aiBox").hidden=false;
+  $("planMode").addEventListener("click",e=>{
+    const button=e.target.closest("button[data-plan]");if(!button)return;
+    if(state.busy&&!state.tsWait)return;
+    choose("planMode","plan",button.dataset.plan,"plan");
+    if(button.dataset.plan==="preview"){
+      settleToken("reject",new Error("Human check cancelled. You can use the browser preview."));
+    }else if(!state.busy){
+      setAINote("Checking AI quota…");
+      api.status().then(r=>setAINote(r.ok?ClaqeAPI.describeQuota(r.data):r.message));
+    }
+  });
   async function create(){
     if(state.busy||state.clips.length<2)return;
     state.busy=true;refresh();$("result").style.display="none";
-    let ff=null,paths=[];
+    let ff=null,paths=[],aiPlan=null;
     try{
+      if(state.plan==="ai"&&aiEnabled){aiPlan=await getAIPlan();if(!aiPlan)return}
       ff=await engine();
       setStatus("Preparing your footage…");
       const readiness=canRender();if(!readiness.ok)throw new Error(readiness.msg);
-      const plan=buildEditPlan(state.clips);
+      const plan=aiPlan?aiPlan.plan:buildEditPlan(state.clips);
+      const source=aiPlan?aiPlan.source:"browser-preview";
       const files=state.clips.map((c,i)=>{
         const ext=c.file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g,"");
         return "input_"+i+"."+(["mp4","mov","webm","m4v"].includes(ext)?ext:"mp4");
@@ -285,7 +397,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       $("preview").src=state.outputURL;
       $("download").href=state.outputURL;
       $("result").style.display="block";
-      setStatus("Film ready! The MP4 contains real editing effects and an embedded watermark.");
+      $("resultNote").textContent=aiEnabled?ClaqeAPI.describeSource(source)+" · the CLAQE watermark is embedded in the video.":"Preview export · the CLAQE watermark is embedded in the video.";
+      setStatus(source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
       paths.push("claqe_film.mp4");
       $("result").scrollIntoView({behavior:"smooth",block:"start"});
     }catch(err){

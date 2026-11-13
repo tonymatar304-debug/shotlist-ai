@@ -207,13 +207,20 @@ describe("users and free monthly limit", () => {
     w.sql("UPDATE users SET plan='paid' WHERE id='" + (await uidOf(paid)) + "'");
     for (let i = 0; i < 5; i++) assert.equal((await gen(paid)).status, 200);
   });
-  test("no free_monthly_limit setting means no per-user cap", async () => {
-    const c = await withPass();
-    mock.respond(200, planBody(GOOD_PLAN));
-    w.sql("DELETE FROM settings WHERE key='free_monthly_limit'");
-    try { for (let i = 0; i < 5; i++) assert.equal((await gen(c)).status, 200); }
-    finally { w.sql("INSERT INTO settings (key, value) VALUES ('free_monthly_limit','3')"); }
-  });
+  for (const [name, setup] of [["missing", "DELETE FROM settings WHERE key='free_monthly_limit'"], ["non-numeric", "UPDATE settings SET value='abc' WHERE key='free_monthly_limit'"], ["negative", "UPDATE settings SET value='-1' WHERE key='free_monthly_limit'"], ["empty", "UPDATE settings SET value='' WHERE key='free_monthly_limit'"]]) {
+    test("fail closed for free users when free_monthly_limit is " + name, async () => {
+      const c = await withPass();
+      mock.respond(200, planBody(GOOD_PLAN));
+      const calls = mock.calls.length;
+      w.sql(setup);
+      try {
+        const r = await gen(c);
+        assert.equal(r.status, 503); assert.equal(r.data.code, "quota_unconfigured");
+        assert.equal(mock.calls.length, calls); // no upstream (paid) call
+        assert.equal((await c.call("/status")).data.quota_configured, false);
+      } finally { w.sql("DELETE FROM settings WHERE key='free_monthly_limit'"); w.sql("INSERT INTO settings (key, value) VALUES ('free_monthly_limit','3')"); }
+    });
+  }
 });
 
 describe("schema (matches verified remote schema)", () => {
