@@ -3,29 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claqe dev test — /generate</title>
+<title>claqe dev test v2</title>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <style>
   body{background:#0b0c0e;color:#eceae4;font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:30px auto;padding:0 16px}
   h1{font-size:20px}
+  h2{font-size:16px;margin-top:28px}
   label{display:block;margin:14px 0 4px;color:#a8a8a0;font-size:13px}
-  input,select{width:100%;background:#17191e;color:#fff;border:1px solid #333;border-radius:8px;padding:8px}
-  .row{display:flex;gap:8px}
-  .row > *{flex:1}
+  input,select{width:100%;background:#17191e;color:#fff;border:1px solid #333;border-radius:8px;padding:8px;box-sizing:border-box}
   button{margin-top:16px;background:#86bfcc;color:#0b0c0e;border:0;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}
-  button:disabled{opacity:.4;cursor:not-allowed}
-  pre{background:#17191e;border:1px solid #333;border-radius:8px;padding:12px;white-space:pre-wrap;word-break:break-word;margin-top:16px;font-size:13px}
+  pre{background:#17191e;border:1px solid #333;border-radius:8px;padding:12px;white-space:pre-wrap;word-break:break-word;margin-top:16px;font-size:13px;max-height:400px;overflow:auto}
   .clip{border:1px solid #333;border-radius:8px;padding:10px;margin-top:8px}
+  .step{opacity:.5}
+  .step.done{opacity:1}
 </style>
 </head>
 <body>
-<h1>claqe — dev test (/pass + /generate)</h1>
-<p>Worker: <code id="base">https://shotlist-api-dev.tonymatar304.workers.dev</code></p>
+<h1>claqe — dev test v2</h1>
+<p>Worker: <code>https://shotlist-api-dev.tonymatar304.workers.dev</code></p>
 
-<div class="cf-turnstile" data-sitekey="0x4AAAAAAF8-xqvui6vubcqJ" data-callback="onTurnstileSuccess"></div>
-<button id="getpass" disabled>1. Get pass (verifies you're human)</button>
+<h2>Step 1: human verification</h2>
+<div class="cf-turnstile" data-sitekey="0x4AAAAAAF8-xqvui6vubcqJ"></div>
+<button id="getpass">Get pass</button>
 
-<h2 style="margin-top:28px;font-size:16px">Sample clips</h2>
+<h2>Step 2: sample clips</h2>
 <div id="clips"></div>
 
 <label>Style</label>
@@ -35,10 +36,71 @@
   <option value="vintage">Vintage</option>
 </select>
 
-<label>Target total seconds (max 30 for Free)</label>
+<label>Target total seconds (max 30)</label>
 <input id="target" type="number" value="30" min="5" max="30">
 
-<button id="generate" disabled>2. Generate plan (real Claude call)</button>
+<button id="generate">Generate plan</button>
 <button id="status">Check /status</button>
 
-<pre id="out">Waiting…</pre>
+<pre id="out">Ready. Solve the Turnstile check above, then click Get pass.</pre>
+
+<script>
+"use strict";
+var BASE = "https://shotlist-api-dev.tonymatar304.workers.dev";
+var out = document.getElementById("out");
+function log(label, data) { out.textContent = label + ":\n" + (typeof data === "string" ? data : JSON.stringify(data, null, 2)); }
+
+var defaults = [5.2, 8.0, 6.4];
+var clipsDiv = document.getElementById("clips");
+defaults.forEach(function (d, i) {
+  var wrap = document.createElement("div");
+  wrap.className = "clip";
+  wrap.innerHTML = '<label>Clip ' + (i + 1) + ' length (seconds)</label><input type="number" step="0.1" value="' + d + '" class="cliplen">';
+  clipsDiv.appendChild(wrap);
+});
+
+function readTurnstileToken() {
+  var input = document.querySelector('.cf-turnstile input[name="cf-turnstile-response"]');
+  return input ? input.value : "";
+}
+
+document.getElementById("getpass").addEventListener("click", function () {
+  var token = readTurnstileToken();
+  if (!token) { log("Error", "No Turnstile token yet. Wait for the checkbox to finish, then try again."); return; }
+  log("Sending", "POST /pass …");
+  fetch(BASE + "/pass", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ turnstileToken: token })
+  })
+    .then(function (r) { return r.json().then(function (d) { return { status: r.status, body: d }; }); })
+    .then(function (res) { log("/pass response (HTTP " + res.status + ")", res.body); })
+    .catch(function (e) { log("/pass network error", String(e)); });
+});
+
+document.getElementById("status").addEventListener("click", function () {
+  fetch(BASE + "/status", { credentials: "include" })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { log("/status", d); })
+    .catch(function (e) { log("/status error", String(e)); });
+});
+
+document.getElementById("generate").addEventListener("click", function () {
+  var clips = Array.prototype.map.call(document.querySelectorAll(".cliplen"), function (i) { return { duration: parseFloat(i.value) }; });
+  var style = document.getElementById("style").value;
+  var targetSeconds = parseFloat(document.getElementById("target").value);
+  log("Sending", "POST /generate …");
+  fetch(BASE + "/generate", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clips: clips, style: style, targetSeconds: targetSeconds })
+  })
+    .then(function (r) { return r.json().then(function (d) { return { status: r.status, body: d }; }); })
+    .then(function (res) { log("/generate response (HTTP " + res.status + ")", res.body); })
+    .catch(function (e) { log("/generate network error", String(e)); });
+});
+</script>
+</body>
+</html>
