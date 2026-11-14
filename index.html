@@ -46,6 +46,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <script src="vendor/ffmpeg/ffmpeg.js"></script>
 <script src="claqe-config.js"></script>
 <script src="claqe-api.js"></script>
+<script src="claqe-analyze.js"></script>
+<script src="claqe-vision.js"></script>
 </head>
 <body>
 <main>
@@ -54,7 +56,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <p class="intro">Bring your clips. Choose a feeling. Turn everyday footage into a film worth sharing.</p>
 <section class="section">
 <label class="label" for="clips">Your footage</label>
-<label class="drop" for="clips"><b>Add video clips</b><small>Choose up to 10 videos at once, or add them one by one. Max 250 MB each.</small><input id="clips" type="file" accept="video/*,.mov,.m4v,.mp4,.hevc" multiple></label>
+<label class="drop" for="clips"><b>Add video clips</b><small>Choose up to 5 videos at once, or add them one by one. Up to 60 seconds each.</small><input id="clips" type="file" accept="video/*,.mov,.m4v,.mp4,.hevc" multiple></label>
 <ul id="files" aria-live="polite"></ul><p class="smallnote" id="clipHint">Select multiple clips or add them individually.</p><p class="smallnote" id="renderNote"></p>
 </section>
 <section class="section">
@@ -97,11 +99,12 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 (function(){
   const $ = id => document.getElementById(id);
   const state = {clips:[],style:"cinematic",format:"vertical",plan:"preview",busy:false,ff:null,outputURL:null,blobURLs:[],tsWait:null};
-  const maxFiles = 10;
-  const maxSize = 250*1024*1024;
-  const maxTotal = 750*1024*1024;
-  const renderMaxSize = 80*1024*1024;
-  const renderMaxTotal = 180*1024*1024;
+  // Product limits. Render limits stay at the sizes verified by tests/e2e/*.stress.mjs; raise only with measurements.
+  // window.CLAQE_LIMITS may override any key (used by the stress tests).
+  const MB = 1024*1024;
+  const LIMITS = Object.assign({maxFiles:5,maxClipSeconds:60,maxTotalSeconds:180,filmSeconds:30,
+    maxSize:250*MB,maxTotal:750*MB,renderMaxSize:80*MB,renderMaxTotal:180*MB},window.CLAQE_LIMITS||{});
+  const {maxFiles,maxSize,maxTotal,renderMaxSize,renderMaxTotal}=LIMITS;
   const ffmpegVersion = "0.12.15";
   const coreVersion = "0.12.10";
   const coreBase = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@" + coreVersion + "/dist/umd";
@@ -112,7 +115,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   const bytes=files=>files.reduce((n,c)=>n+(c.file?c.file.size:c.size),0);
   function canRender(){
     if(state.clips.length<2)return {ok:false,msg:"Add at least 2 clips to create your film."};
-    if(state.clips.length>4)return {ok:false,msg:"Bulk selection works. Rendering more than 4 clips needs the upcoming server renderer."};
+    if(state.clips.some(c=>Number.isFinite(c.duration)&&c.duration>LIMITS.maxClipSeconds))return {ok:false,msg:"Each clip can be up to "+LIMITS.maxClipSeconds+" seconds. Trim the longer clips and add them again."};
+    if(state.clips.reduce((n,c)=>n+(Number.isFinite(c.duration)?c.duration:0),0)>LIMITS.maxTotalSeconds)return {ok:false,msg:"Your clips can add up to "+Math.round(LIMITS.maxTotalSeconds/60)+" minutes of footage in total."};
     if(state.clips.some(c=>c.file.size>renderMaxSize)||bytes(state.clips)>renderMaxTotal)return {ok:false,msg:"Clips selected successfully. These large files need server rendering, which is not built yet. The current browser test supports up to 80 MB per clip / 180 MB total."};
     if(state.clips.some(c=>!Number.isFinite(c.duration)))return {ok:false,msg:"Clips selected, but your phone could not decode their metadata. For these formats, we need server-side video processing."};
     return {ok:true,msg:"Ready for a short test export. Browser video processing may still fail on phones."};
@@ -163,9 +167,9 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   $("clips").addEventListener("change",async event=>{
     const picked=Array.from(event.target.files||[]);event.target.value="";
     if(!picked.length||state.busy)return;
-    if(state.clips.length+picked.length>maxFiles){setStatus("You can select up to 10 clips total.",true);return}
+    if(state.clips.length+picked.length>maxFiles){setStatus("You can select up to "+maxFiles+" clips total.",true);return}
     if(picked.some(f=>f.size>maxSize)||bytes(state.clips)+bytes(picked)>maxTotal){
-      setStatus("Clip intake currently allows 250 MB per clip or 750 MB total. Try shorter clips.",true);return;
+      setStatus("Clip intake currently allows "+Math.round(maxSize/MB)+" MB per clip or "+Math.round(maxTotal/MB)+" MB total. Try shorter clips.",true);return;
     }
     const keys=new Set(state.clips.map(c=>c.file.name+"|"+c.file.size+"|"+c.file.lastModified));
     const newClips=picked.filter(f=>!keys.has(f.name+"|"+f.size+"|"+f.lastModified)).map(file=>({file,duration:null}));
@@ -231,7 +235,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   function buildEditPlan(clips){
     const initial=clips.map(c=>Math.min(6.5,Math.max(1,c.duration-.25)));
     const sum=initial.reduce((a,b)=>a+b,0);
-    const ratio=Math.min(1,22/sum);
+    const ratio=Math.min(1,LIMITS.filmSeconds/sum);
     return clips.map((clip,i)=>{
       const duration=Math.round(initial[i]*ratio*10)/10;
       const start=Math.max(0,Math.min(clip.duration-duration-.15,i%2===0?.25:.6));
@@ -256,7 +260,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     }
     const inputs=plan.map((_,i)=>"[v"+i+"]").join("");
     segments.push(inputs+"concat=n="+plan.length+":v=1:a=0[film]");
-    segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
+    segments.push("[film]["+state.clips.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
   }
   // ---- Optional AI edit plan (claqe-api.js). Without a configured API the browser preview works unchanged. ----
@@ -330,6 +334,25 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     }
     return order.map(o=>({src:o.index,start:Math.round(o.start*10)/10,duration:Math.round(o.duration*10)/10}));
   }
+  // Semantic path (opt-in: window.CLAQE_VISION=true; real model NOT yet verified). Any failure that did not use the user's edit falls back to local analysis.
+  const SOFT_FAIL=["ai_unavailable","vision_unusable","network","bad_response","server_error"];
+  async function visionPlan(fail){
+    const local=await localPlan(),analysed=state.clips.map(c=>c.analysis);
+    const soft=msg=>({plan:local.plan,source:"local-analysis",note:msg+" Used local footage analysis instead."});
+    let req,images;
+    try{
+      req=ClaqeVision.buildVisionRequest(analysed,{style:state.style,filmSeconds:LIMITS.filmSeconds});
+      setStatus("Sending "+ClaqeVision.frameIds(req).length+" small frames to the AI vision editor…");
+      images=await ClaqeVision.captureForRequest(state.clips.map(c=>c.file),req);
+    }catch(e){return soft("Couldn't prepare frames for AI vision.")}
+    const r=await api.vision({request:req,images});
+    api.status().then(x=>{if(x.ok)setAINote(ClaqeAPI.describeQuota(x.data))});
+    if(!r.ok)return SOFT_FAIL.includes(r.code)?soft(r.message):fail(r.message);
+    const v=ClaqeVision.validateVisionResponse(r.vision,req);
+    if(!v)return soft(ClaqeAPI.MESSAGES.vision_unusable.text);
+    ClaqeVision.applyVision(analysed,req,v);
+    return {plan:ClaqeAnalyze.planFilm(analysed,state.style,LIMITS.filmSeconds).plan,source:"ai-vision"};
+  }
   async function getAIPlan(){
     const fail=m=>{setStatus(m+"\nChoose \u201cBrowser preview\u201d to make a film without AI.",true);return null};
     const access=await ensureAccess();
@@ -339,8 +362,9 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     if(d.ai_enabled===false)return fail(ClaqeAPI.MESSAGES.ai_disabled.text);
     if(d.quota_configured===false||!d.free)return fail(ClaqeAPI.MESSAGES.quota_unconfigured.text);
     if(d.free.used>=d.free.limit)return fail(ClaqeAPI.MESSAGES.free_limit.text);
+    if(window.CLAQE_VISION===true)return visionPlan(fail);
     setStatus("The AI editor is planning your cuts…");
-    const g=await api.generate({clips:state.clips,style:state.style,targetSeconds:22});
+    const g=await api.generate({clips:state.clips,style:state.style,targetSeconds:LIMITS.filmSeconds});
     api.status().then(r=>{if(r.ok)setAINote(ClaqeAPI.describeQuota(r.data))});
     if(!g.ok)return fail(g.message);
     const plan=usablePlan(g.plan&&g.plan.order,state.clips.length);
@@ -359,22 +383,55 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       api.status().then(r=>setAINote(r.ok?ClaqeAPI.describeQuota(r.data):r.message));
     }
   });
+  // Opt-in lazy source access (window.CLAQE_LAZY=true): FFmpeg reads the File through WORKERFS instead of a full in-memory copy. Falls back to copying on any mount error.
+  async function mountLazy(ff,i,files,mounts){
+    const dir="/claqe_src"+i;
+    try{
+      await ff.createDir(dir);
+      await ff.mount("WORKERFS",{blobs:[{name:files[i],data:state.clips[i].file}]},dir);
+      mounts.push(dir);window.__claqeLazyCount=(window.__claqeLazyCount||0)+1;files[i]=dir+"/"+files[i];return true;
+    }catch(e){console.warn("CLAQE lazy mount unavailable, copying instead:",e&&e.message);try{await ff.deleteDir(dir)}catch(_){}return false}
+  }
+  // Local footage analysis (claqe-analyze.js): whole-clip sampling + deterministic planner. Not AI. Cached per clip.
+  async function localPlan(){
+    state.clips.forEach(c=>{if(c.analysis)c.analysis.samples.forEach(s=>{delete s.sem})}); // local-only plans never carry old semantic data
+    const n=state.clips.length,out=[];
+    for(let i=0;i<n;i++){
+      const c=state.clips[i];
+      if(!c.analysis){
+        let k=0;const total=Math.ceil(c.duration);
+        c.analysis=await ClaqeAnalyze.analyzeClip(c.file,c.duration,{onSample:()=>setStatus("Analyzing footage: clip "+(i+1)+" of "+n+" ("+Math.min(99,Math.round(++k/total*100))+"%)…")});
+      }
+      out.push(c.analysis);
+    }
+    setStatus("Choosing moments from your footage…");
+    return ClaqeAnalyze.planFilm(out,state.style,LIMITS.filmSeconds);
+  }
+  function shotNotes(plan){
+    const t=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
+    return plan.map(p=>"clip "+(p.src+1)+" "+t(p.start)+"–"+t(p.start+p.duration)+(p.reason?" ("+p.reason+")":"")).join("; ");
+  }
   async function create(){
     if(state.busy||state.clips.length<2)return;
     state.busy=true;refresh();$("result").style.display="none";
-    let ff=null,paths=[],aiPlan=null;
+    let ff=null,paths=[],mounts=[],aiPlan=null;
     try{
       if(state.plan==="ai"&&aiEnabled){aiPlan=await getAIPlan();if(!aiPlan)return}
       ff=await engine();
       setStatus("Preparing your footage…");
       const readiness=canRender();if(!readiness.ok)throw new Error(readiness.msg);
-      const plan=aiPlan?aiPlan.plan:buildEditPlan(state.clips);
-      const source=aiPlan?aiPlan.source:"browser-preview";
+      let plan,source;
+      if(aiPlan){plan=aiPlan.plan;source=aiPlan.source}
+      else{
+        try{plan=(await localPlan()).plan;source="local-analysis"}
+        catch(e){console.warn("CLAQE footage analysis unavailable, using the basic preview plan:",e&&e.message);plan=buildEditPlan(state.clips);source="browser-preview"}
+      }
       const files=state.clips.map((c,i)=>{
         const ext=c.file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g,"");
         return "input_"+i+"."+(["mp4","mov","webm","m4v"].includes(ext)?ext:"mp4");
       });
       for(let i=0;i<files.length;i++){
+        if(window.CLAQE_LAZY===true&&await mountLazy(ff,i,files,mounts))continue;
         await ff.writeFile(files[i],new Uint8Array(await state.clips[i].file.arrayBuffer()));
         paths.push(files[i]);
       }
@@ -397,14 +454,15 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       $("preview").src=state.outputURL;
       $("download").href=state.outputURL;
       $("result").style.display="block";
-      $("resultNote").textContent=aiEnabled?ClaqeAPI.describeSource(source)+" · the CLAQE watermark is embedded in the video.":"Preview export · the CLAQE watermark is embedded in the video.";
-      setStatus(source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
+      $("resultNote").textContent=source==="local-analysis"||source==="ai-vision"?ClaqeAPI.describeSource(source)+" · "+shotNotes(plan)+(aiPlan&&aiPlan.note?" · "+aiPlan.note:"")+" · watermark embedded.":aiEnabled?ClaqeAPI.describeSource(source)+" · the CLAQE watermark is embedded in the video.":"Preview export · the CLAQE watermark is embedded in the video.";
+      setStatus(source==="ai-vision"?"Film ready! An AI model described sampled frames and CLAQE combined that with local motion and quality analysis; grading and motion are style presets.":source==="local-analysis"?"Film ready! Moments were chosen by local footage analysis (motion, sharpness, exposure, scene cuts), not by AI; grading and motion are style presets.":source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
       paths.push("claqe_film.mp4");
       $("result").scrollIntoView({behavior:"smooth",block:"start"});
     }catch(err){
       console.error(err);
       setStatus("Export failed: "+(err&&err.message?err.message:String(err))+"\nThe browser renderer is experimental. Try shorter MP4 clips on desktop Chrome/Edge.",true);
     }finally{
+      if(ff){for(const m of mounts){try{await ff.unmount(m)}catch(_){}try{await ff.deleteDir(m)}catch(_){}}}
       if(ff){for(const path of paths){try{await ff.deleteFile(path)}catch(_){}}}
       state.busy=false;refresh();
     }

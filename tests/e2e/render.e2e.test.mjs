@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { devices } from "playwright-core";
 import { staticServer, listen, launch, routeRealFfmpeg, FIXTURES } from "./lib.mjs";
 import { routeTurnstileStub, solveTurnstile, routeApi, newApiState, openUrl } from "./mocks.mjs";
 
@@ -21,7 +22,7 @@ beforeEach(async () => {
   ctx = await browser.newContext();
   await routeRealFfmpeg(ctx); await routeTurnstileStub(ctx); await routeApi(ctx, api);
   page = await ctx.newPage();
-  page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 200)));
+  page.on("console", (m) => /CLAQE lazy/.test(m.text()) && console.log("CONSOLE", m.text())); page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 200)));
 });
 afterEach(async () => { await ctx?.close(); });
 
@@ -77,7 +78,7 @@ describe("real MP4 export", () => {
     assert.ok(Math.abs(m.duration - 5.6) < 0.25, "duration " + m.duration); // local plan: 2 x 2.8 s
     assert.deepEqual(m.px.map(dom), ["red", "green", "blue"]); // clip A red part, A green part, then clip B
     assert.ok(m.played > 0.3, "plays: " + m.played);
-    assert.match(await text("#resultNote"), /^Preview export/);
+    assert.match(await text("#resultNote"), /^Footage-aware edit from local video analysis \(not AI\)/);
     // Second render in the same page (engine reuse, cleanup) with a different style/format.
     const first = await page.getAttribute("#download", "href");
     await page.click('button[data-style="vintage"]'); await page.click('button[data-format="landscape"]');
@@ -105,6 +106,23 @@ describe("real MP4 export", () => {
     assert.deepEqual(api.calls.find((c) => c.path === "/generate").body.clips, [{ duration: 3 }, { duration: 3 }]); // real metadata, durations only
   });
 
+  test("lazy source access (WORKERFS): mounts the File, same pixels/trims/duration, repeat render, no stale mounts", async () => {
+    await page.addInitScript(() => { window.CLAQE_LAZY = true; });
+    await page.goto(openUrl(port, false));
+    await addClips([RG, BLUE]);
+    for (let round = 0; round < 2; round++) {
+      const before = await page.getAttribute("#download", "href");
+      await page.click("#create");
+      await page.waitForFunction((b) => /Film ready|Export failed/.test(document.getElementById("status").textContent) && document.getElementById("download").href !== b, before, { timeout: 240000 });
+      assert.match(await text("#status"), /Film ready/, await text("#status"));
+      const m = await inspect([0.6, 2.2, 4.2]);
+      assert.deepEqual([m.w, m.h], [360, 640]);
+      assert.ok(Math.abs(m.duration - 5.6) < 0.25, "duration " + m.duration);
+      assert.deepEqual(m.px.map(dom), ["red", "green", "blue"]);
+    }
+    assert.equal(await page.evaluate(() => window.__claqeLazyCount), 4, "both clips mounted lazily in both renders");
+  });
+
   test("4 clips: renders, correct order and total length; records time and JS heap", async () => {
     await page.goto(openUrl(port, false));
     await addClips([RG, BLUE, YEL, MAG]);
@@ -122,13 +140,12 @@ describe("real MP4 export", () => {
 });
 
 describe("intake limits (no render)", () => {
-  test("5 clips selectable but blocked with a clear message; more than 10 refused", async () => {
+  test("5 clips allowed; more than 5 refused", async () => {
     await page.goto(openUrl(port, false));
     await page.setInputFiles("#clips", [RG, BLUE, YEL, MAG, RG].map((n, i) => ({ ...fx(n), name: i + "_" + n })));
-    await page.waitForFunction(() => /more than 4 clips/.test(document.getElementById("renderNote").textContent), null, { timeout: 20000 });
-    assert.equal(await page.isDisabled("#create"), true);
-    await page.setInputFiles("#clips", Array.from({ length: 6 }, (_, i) => ({ ...fx(YEL), name: "x" + i + ".mp4" })));
-    await waitStatus(/up to 10 clips/, 10000);
+    await page.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 20000 });
+    await page.setInputFiles("#clips", [{ ...fx(YEL), name: "sixth.mp4" }]);
+    await waitStatus(/up to 5 clips/, 10000);
   });
   test("a clip over 80 MB is refused for browser rendering with an actionable note", async () => {
     await page.goto(openUrl(port, false));
@@ -138,5 +155,28 @@ describe("intake limits (no render)", () => {
     await page.setInputFiles("#clips", [path.join(FIXTURES, RG), big]);
     await page.waitForFunction(() => /server rendering/.test(document.getElementById("renderNote").textContent), null, { timeout: 30000 });
     assert.equal(await page.isDisabled("#create"), true);
+  });
+});
+
+describe("mobile (Pixel 7 emulation: touch, 412x915; real Android/iOS memory is NOT testable here)", () => {
+  test("layout fits, tap targets are usable, and a real render works with touch", async () => {
+    const mctx = await browser.newContext({ ...devices["Pixel 7"] });
+    await routeRealFfmpeg(mctx);
+    const mp = await mctx.newPage();
+    try {
+      await mp.goto(openUrl(port, false));
+      assert.equal(await mp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "no horizontal scroll");
+      await mp.setInputFiles("#clips", [fx(RG), fx(BLUE)]);
+      await mp.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 20000 });
+      const box = await mp.locator("#create").boundingBox();
+      assert.ok(box.height >= 44 && box.x >= 0 && box.x + box.width <= 412, "create button usable: " + JSON.stringify(box));
+      for (const sel of ['button[data-style="dynamic"]', 'button[data-format="landscape"]']) {
+        const b = await mp.locator(sel).boundingBox(); assert.ok(b.height >= 40, sel + " tap target " + b.height);
+      }
+      await mp.tap("#create");
+      await mp.waitForFunction(() => /Film ready|Export failed/.test(document.getElementById("status").textContent), null, { timeout: 240000 });
+      assert.match(await mp.textContent("#status"), /Film ready/);
+      assert.equal(await mp.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "no horizontal scroll after result");
+    } finally { await mctx.close(); }
   });
 });

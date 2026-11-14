@@ -27,13 +27,14 @@
     pass_required: { text: "Please complete the human check first, then try again.", retry: true },
     ai_disabled: { text: "AI editing is paused right now. You can still make a browser preview.", retry: false },
     rate_limited: { text: "Too many requests. Wait a few minutes and try again.", retry: true },
-    invalid_request: { text: "Those clips couldn't be sent. Check that you have 2 to 4 valid clips and try again.", retry: false },
+    invalid_request: { text: "Those clips couldn't be sent. Check that you have 2 to 5 valid clips (up to 60 seconds each) and try again.", retry: false },
     free_limit: { text: "You've used all your free AI edits for this month. You can still make a browser preview.", retry: false },
     quota_unconfigured: { text: "AI editing is temporarily unavailable. You can still make a browser preview.", retry: false },
     account_inactive: { text: "This account can't use AI editing.", retry: false },
     budget_daily: { text: "CLAQE's AI capacity for today is used up. Try again tomorrow, or make a browser preview.", retry: false },
     budget_monthly: { text: "CLAQE's AI capacity for this month is used up. You can still make a browser preview.", retry: false },
     ai_unavailable: { text: "The AI editor is temporarily unavailable. Your free edit was not used. Try again shortly.", retry: true },
+    vision_unusable: { text: "The AI vision reply couldn't be used, so your film uses local footage analysis instead. Your free edit was not used.", retry: true },
     network: { text: "Couldn't reach the CLAQE server. Check your connection and try again.", retry: true },
     bad_response: { text: "The CLAQE server sent an unexpected reply. Try again later.", retry: true },
     server_error: { text: "Something went wrong on the server. Try again.", retry: true },
@@ -49,6 +50,7 @@
   function createClient({ baseUrl, fetch: fetchImpl } = {}) {
     if (!baseUrl) throw new Error("CLAQE API base URL is not configured.");
     const doFetch = fetchImpl || ((...a) => fetch(...a));
+    async function request_(path, o) { return request(path, o); }
     async function request(path, { method = "GET", body } = {}) {
       let res;
       try {
@@ -64,6 +66,12 @@
       return { ok: true, status: res.status, data };
     }
     return {
+      // Semantic vision: one call per film. `request` is ClaqeVision.buildVisionRequest(); `images` = [{id, data(base64 JPEG)}].
+      // Returns { ok, vision } (UNVALIDATED: pass through ClaqeVision.validateVisionResponse) or an error.
+      async vision({ request, images }) {
+        const r = await request_("/vision", { method: "POST", body: { request, images } });
+        return r.ok ? { ok: true, status: r.status, vision: r.data.vision, passUsage: r.data.passUsage } : r;
+      },
       // Exchange a Turnstile token for the pass cookie (HttpOnly; the page never sees it).
       async pass(turnstileToken) {
         if (!turnstileToken) return toError(403, { code: "verification_failed" });
@@ -94,6 +102,8 @@
   const SOURCE_LABELS = {
     ai: "AI-assisted edit plan",
     "server-fallback": "Standard edit plan (the AI reply wasn't usable, so this is not AI-edited)",
+    "ai-vision": "AI-assisted edit: an AI model described sampled frames; cuts combine that with local analysis",
+    "local-analysis": "Footage-aware edit from local video analysis (not AI)",
     "browser-preview": "Browser preview · no AI",
   };
   const describeSource = (source) => SOURCE_LABELS[source] || SOURCE_LABELS["browser-preview"];

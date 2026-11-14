@@ -1,3 +1,4 @@
+import { EST_COST_VISION, VISION_MAX_BODY, validateVisionInput, validateVisionOutput, callVision } from "./vision.js";
 const ALLOWED_ORIGIN = "https://claqe.com";
 const PASS_TTL_SECONDS = 60 * 60 * 24 * 30;
 const PASS_LIMIT = 30;
@@ -6,7 +7,9 @@ const WINDOW_SECONDS = 600;
 const EST_COST = 0.003; // safe worst-case reservation per generate call
 const MODEL = "claude-haiku-5-5";
 const MAX_OUTPUT_TOKENS = 500;
-const FREE_MAX_CLIPS = 4;
+const FREE_MAX_CLIPS = 5;
+const MAX_CLIP_SECONDS = 60;    // per source clip
+const MAX_TOTAL_SECONDS = 180;  // combined source footage (independent of the finished film length)
 const FREE_MAX_SECONDS = 30;
 const STYLES = ["cinematic", "dynamic", "vintage"];
 
@@ -71,9 +74,27 @@ async function ensureUser(db, uid) {
 async function monthlyUsage(db, uid) {
   const d = new Date();
   const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-  const row = await db.prepare("SELECT COUNT(*) AS n FROM usage_log WHERE user_id = ? AND ts >= ? AND status IN ('ok','fallback')")
-    .bind(uid, monthStart).first();
+  const row = await db.prepare(`SELECT COUNT(*) AS n FROM usage_log WHERE user_id = ? AND ts >= ? AND (status IN ('ok','fallback') OR (status = 'pending' AND ts >= ?))`)
+    .bind(uid, monthStart, Date.now() - PENDING_TTL_MS).first();
   return row ? row.n : 0;
+}
+// Atomically claim one generation slot: a single INSERT ... SELECT that only succeeds while the user is under their limit.
+// Concurrent requests are serialised by D1, so two requests at "2 of 3" cannot both pass. Returns the row id or null.
+const PENDING_TTL_MS = 120000;
+async function claimSlot(db, uid, ipHash, limit) {
+  const d = new Date(), monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1), now = Date.now();
+  const row = await db.prepare(
+    `INSERT INTO usage_log (ts, user_id, ip_hash, provider, model, status, duration_ms)
+     SELECT ?, ?, ?, 'anthropic', ?, 'pending', 0
+     WHERE (SELECT COUNT(*) FROM usage_log WHERE user_id = ? AND ts >= ? AND (status IN ('ok','fallback') OR (status = 'pending' AND ts >= ?))) < ?
+     RETURNING id`
+  ).bind(now, uid, ipHash, MODEL, uid, monthStart, now - PENDING_TTL_MS, limit).first();
+  return row ? row.id : null;
+}
+async function dropClaim(db, id) { if (id) await db.prepare("DELETE FROM usage_log WHERE id = ? AND status = 'pending'").bind(id).run(); }
+async function settleClaim(db, id, model, inTok, outTok, cost, status) {
+  await db.prepare("UPDATE usage_log SET model = ?, input_tokens = ?, output_tokens = ?, cost_usd = ?, status = ?, ts = ts WHERE id = ?")
+    .bind(model, inTok, outTok, cost, status, id).run();
 }
 // Returns a non-negative integer, or null when missing/invalid. Callers MUST fail closed on null for free users.
 function freeLimitOf(settings) {
@@ -153,6 +174,7 @@ async function callClaude(apiKey, clips, style, targetSeconds, apiUrl) {
     body: JSON.stringify({
       model: MODEL,
       max_tokens: MAX_OUTPUT_TOKENS,
+      thinking: { type: "disabled" }, // keep the whole budget for the JSON plan (Haiku 5.5 thinks by default)
       messages: [{ role: "user", content: prompt }]
     })
   });
@@ -251,9 +273,12 @@ export default {
           return reply({ ok: false, code: "invalid_request", error: `Select between 2 and ${FREE_MAX_CLIPS} clips.` }, 400);
         }
         for (const c of clips) {
-          if (!c || typeof c.duration !== "number" || !Number.isFinite(c.duration) || c.duration < 1 || c.duration > 300) {
-            return reply({ ok: false, code: "invalid_request", error: "Each clip needs a valid duration." }, 400);
+          if (!c || typeof c.duration !== "number" || !Number.isFinite(c.duration) || c.duration < 1 || c.duration > MAX_CLIP_SECONDS) {
+            return reply({ ok: false, code: "invalid_request", error: `Each clip needs a duration between 1 and ${MAX_CLIP_SECONDS} seconds.` }, 400);
           }
+        }
+        if (clips.reduce((n, c) => n + c.duration, 0) > MAX_TOTAL_SECONDS) {
+          return reply({ ok: false, code: "invalid_request", error: `Combined footage can be up to ${MAX_TOTAL_SECONDS} seconds.` }, 400);
         }
 
         // Per-user monthly quota (users.plan / users.status / settings.free_monthly_limit). Checked after validation.
@@ -272,15 +297,17 @@ export default {
         if (!passLimit.allowed) {
           return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
         }
+        const claim = await claimSlot(env.DB, pass.uid, ipHash, user.plan === "free" ? freeLimit : 1e9);
+        if (!claim) return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
 
         const dPeriod = dailyPeriod(), mPeriod = monthlyPeriod();
         const dailyLimit = parseFloat(settings.daily_budget_usd || "0");
         const monthlyLimit = parseFloat(settings.monthly_budget_usd || "0");
 
         const dOk = await reserve(env.DB, dPeriod, EST_COST, dailyLimit);
-        if (!dOk) return reply({ ok: false, code: "budget_daily", error: "Daily budget cap reached." }, 402);
+        if (!dOk) { await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_daily", error: "Daily budget cap reached." }, 402); }
         const mOk = await reserve(env.DB, mPeriod, EST_COST, monthlyLimit);
-        if (!mOk) { await release(env.DB, dPeriod, EST_COST); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
+        if (!mOk) { await release(env.DB, dPeriod, EST_COST); await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
 
         let order, usage, usedFallback = false, status = "ok";
         try {
@@ -297,6 +324,7 @@ export default {
           console.error(err);
           await release(env.DB, dPeriod, EST_COST);
           await release(env.DB, mPeriod, EST_COST);
+          await dropClaim(env.DB, claim);
           return reply({ ok: false, code: "ai_unavailable", error: "The AI editor is temporarily unavailable. Please try again." }, 502);
         }
 
@@ -307,12 +335,61 @@ export default {
         await release(env.DB, dPeriod, refund);
         await release(env.DB, mPeriod, refund);
 
-        await env.DB.prepare(
-          `INSERT INTO usage_log (ts, user_id, ip_hash, provider, model, input_tokens, output_tokens, cost_usd, status, duration_ms)
-           VALUES (?, ?, ?, 'anthropic', ?, ?, ?, ?, ?, 0)`
-        ).bind(Date.now(), pass.uid, ipHash, MODEL, inTok, outTok, realCost, usedFallback ? "fallback" : "ok").run();
+        await settleClaim(env.DB, claim, MODEL, inTok, outTok, realCost, usedFallback ? "fallback" : "ok");
 
         return reply({ ok: true, plan: { order, style, targetSeconds }, usedFallback, passUsage: `${passLimit.count}/${PASS_LIMIT}`, ipUsage: `${ipLimitRes.count}/${IP_LIMIT}` });
+      }
+
+      if (url.pathname === "/vision") {
+        if (request.method !== "POST") return reply({ ok: false, code: "invalid_request", error: "POST only." }, 405);
+        const pass = await verifyPass(getCookie(request, "slai_pass"), env.PASS_SECRET);
+        if (!pass) return reply({ ok: false, code: "pass_required", error: "No valid pass. Visit /pass first, then retry." }, 401);
+        const settings = await getSettings(env.DB);
+        if (settings.ai_enabled !== "1") return reply({ ok: false, code: "ai_disabled", error: "Generation is currently disabled." }, 403);
+        const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+        const ipHash = await sha256hex(ip);
+        const ipLimitRes = await checkAndIncrementLimit(env.DB, "ip:" + ipHash, IP_LIMIT);
+        if (!ipLimitRes.allowed) return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
+
+        // Cost control: refuse oversized bodies before parsing them.
+        if (Number(request.headers.get("Content-Length") || 0) > VISION_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
+        let text; try { text = await request.text(); } catch { return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400); }
+        if (text.length > VISION_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
+        let body; try { body = JSON.parse(text); } catch { return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400); }
+        const input = validateVisionInput(body, { maxClips: FREE_MAX_CLIPS, maxClipSeconds: MAX_CLIP_SECONDS, maxTotalSeconds: MAX_TOTAL_SECONDS, maxFilmSeconds: FREE_MAX_SECONDS, styles: STYLES });
+        if (input.error) return reply({ ok: false, code: "invalid_request", error: input.error }, 400);
+
+        const user = await ensureUser(env.DB, pass.uid);
+        if (user.status !== "active") return reply({ ok: false, code: "account_inactive", error: "This account is not active." }, 403);
+        const freeLimit = freeLimitOf(settings);
+        if (user.plan === "free" && freeLimit === null) return reply({ ok: false, code: "quota_unconfigured", error: "Generation is temporarily unavailable." }, 503);
+        if (user.plan === "free" && (await monthlyUsage(env.DB, pass.uid)) >= freeLimit) return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
+        const passLimit = await checkAndIncrementLimit(env.DB, "pass:" + pass.uid, PASS_LIMIT);
+        if (!passLimit.allowed) return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
+        const claim = await claimSlot(env.DB, pass.uid, ipHash, user.plan === "free" ? freeLimit : 1e9);
+        if (!claim) return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
+
+        const dPeriod = dailyPeriod(), mPeriod = monthlyPeriod();
+        const dOk = await reserve(env.DB, dPeriod, EST_COST_VISION, parseFloat(settings.daily_budget_usd || "0"));
+        if (!dOk) { await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_daily", error: "Daily budget cap reached." }, 402); }
+        const mOk = await reserve(env.DB, mPeriod, EST_COST_VISION, parseFloat(settings.monthly_budget_usd || "0"));
+        if (!mOk) { await release(env.DB, dPeriod, EST_COST_VISION); await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
+
+        let result;
+        try { result = await callVision(env.ANTHROPIC_API_KEY, input.req, input.images, env.ANTHROPIC_API_URL, MODEL, ANTHROPIC_URL); }
+        catch (err) {
+          console.error(err);
+          await release(env.DB, dPeriod, EST_COST_VISION); await release(env.DB, mPeriod, EST_COST_VISION); await dropClaim(env.DB, claim);
+          return reply({ ok: false, code: "ai_unavailable", error: "The AI editor is temporarily unavailable. Please try again." }, 502);
+        }
+        const vIn = result.usage?.input_tokens || 0, vOut = result.usage?.output_tokens || 0;
+        const vCost = (vIn / 1e6) * 0.10 + (vOut / 1e6) * 0.50, vRefund = Math.max(0, EST_COST_VISION - vCost);
+        await release(env.DB, dPeriod, vRefund); await release(env.DB, mPeriod, vRefund);
+        const vision = validateVisionOutput(result.parsed, input.req);
+        // An unusable reply is logged (the cost is real) but does NOT use up the user's free edit (quota counts only 'ok'/'fallback').
+        await settleClaim(env.DB, claim, MODEL, vIn, vOut, vCost, vision ? "ok" : "bad_reply");
+        if (!vision) return reply({ ok: false, code: "vision_unusable", error: "The AI reply could not be used." }, 502);
+        return reply({ ok: true, vision, passUsage: `${passLimit.count}/${PASS_LIMIT}` });
       }
 
       return reply({ ok: false, error: "Unknown path" }, 404);

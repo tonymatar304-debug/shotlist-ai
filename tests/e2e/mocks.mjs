@@ -40,6 +40,7 @@ export async function routeApi(ctx, st) {
       st.used++;
       return send(200, { ok: true, plan: { order: st.order, style: body.style, targetSeconds: body.targetSeconds }, usedFallback: false, passUsage: "1/30" });
     }
+    if (p === "/vision" && st.vision) { const [status, json] = st.vision(body); if (status === 200) st.used++; return send(status, json); } // st.vision(body) -> [status, json]
     send(404, { ok: false });
   });
 }

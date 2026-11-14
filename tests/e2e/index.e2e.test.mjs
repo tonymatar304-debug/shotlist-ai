@@ -135,6 +135,27 @@ describe("browser preview (no API configured)", () => {
   });
 });
 
+describe("product limits", () => {
+  const f = (n) => ({ name: n, mimeType: "video/mp4", buffer: Buffer.alloc(2048) });
+  test("a clip longer than 60 s is refused with an actionable note", async () => {
+    await open({ ai: false });
+    await page.setInputFiles("#clips", [f("a_61s.mp4"), f("b_8.0s.mp4")]);
+    await page.waitForFunction(() => /up to 60 seconds/.test(document.getElementById("renderNote").textContent), null, { timeout: 15000 });
+    assert.equal(await page.isDisabled("#create"), true);
+  });
+  test("more than 3 minutes of combined footage is refused", async () => {
+    await open({ ai: false });
+    await page.setInputFiles("#clips", [f("a_50s.mp4"), f("b_50s.mp4"), f("c_50s.mp4"), f("d_50s.mp4")]);
+    await page.waitForFunction(() => /3 minutes/.test(document.getElementById("renderNote").textContent), null, { timeout: 15000 });
+    assert.equal(await page.isDisabled("#create"), true);
+  });
+  test("exactly 3 minutes across 5 clips (60 s max each) is accepted", async () => {
+    await open({ ai: false });
+    await page.setInputFiles("#clips", [f("a_60s.mp4"), f("b_60s.mp4"), f("c_30s.mp4"), f("d_20s.mp4"), f("e_10s.mp4")]);
+    await page.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 15000 });
+  });
+});
+
 describe("AI edit plan", () => {
   test("happy path: Turnstile (official test key) → /pass → /status → /generate; plan order drives the render", async () => {
     await open();

@@ -14,12 +14,20 @@ const jobs = {
   "hd-blue-3s.mp4": [...solid("blue", "1280x720", 3), ...enc],
   "hd-yellow-3s.mp4": [...solid("yellow", "1280x720", 3), ...enc],
 };
+// 20 s clips for footage-analysis tests: still colour bars (no motion) vs busy moving test pattern with noise, in either order.
+const bars = (d) => ["-f", "lavfi", "-i", `smptebars=s=320x180:d=${d}:r=24`];
+const busy = (d) => ["-f", "lavfi", "-i", `testsrc2=s=320x180:d=${d}:r=24`];
+jobs["still-then-busy-20s.mp4"] = [...bars(10), ...busy(10), "-filter_complex", "[1]noise=alls=20:allf=t[b];[0][b]concat=n=2:v=1:a=0[o]", "-map", "[o]", ...enc];
+jobs["busy-then-still-20s.mp4"] = [...busy(10), ...bars(10), "-filter_complex", "[0]noise=alls=20:allf=t[b];[b][1]concat=n=2:v=1:a=0[o]", "-map", "[o]", ...enc];
+jobs["gray-20s.mp4"] = [...solid("0x606060", "320x180", 20), ...enc];
 const web = staticServer(); const port = await listen(web);
 const browser = await launch(); const ctx = await browser.newContext(); await routeRealFfmpeg(ctx);
 const page = await ctx.newPage();
 await page.goto(`http://localhost:${port}/index.html`);
 fs.mkdirSync(FIXTURES, { recursive: true });
+const only = process.argv.slice(2);
 for (const [name, args] of Object.entries(jobs)) {
+  if (only.length && !only.includes(name)) continue;
   const buf = await ffmpegInPage(page, [...args, name], name);
   fs.writeFileSync(path.join(FIXTURES, name), buf);
   console.log(name, buf.length, "bytes");

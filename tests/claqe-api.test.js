@@ -56,7 +56,7 @@ test("errors map to actionable text and NEVER yield a plan", async () => {
     [402, { code: "budget_daily" }, /today/], [402, { code: "budget_monthly" }, /month/],
     [502, { code: "ai_unavailable" }, /was not used/], [401, { code: "pass_required" }, /human check/],
     [403, { code: "verification_failed" }, /verification failed/], [403, { code: "origin_not_allowed" }, /official address/],
-    [429, { code: "rate_limited" }, /Too many/], [403, { code: "ai_disabled" }, /paused/], [400, { code: "invalid_request" }, /2 to 4/],
+    [429, { code: "rate_limited" }, /Too many/], [403, { code: "ai_disabled" }, /paused/], [400, { code: "invalid_request" }, /2 to 5/],
     [401, { ok: false, error: "No valid pass" }, /human check/], [500, { ok: false }, /server/],
   ];
   for (const [status, body, re] of cases) {
@@ -93,4 +93,12 @@ test("contract: every error code the Worker can emit has a client message", () =
   const codes = new Set([...src.matchAll(/code: "([a-z_]+)"/g)].map((m) => m[1]));
   assert.ok(codes.size >= 12, "found " + codes.size);
   for (const code of codes) assert.ok(MESSAGES[code], "missing client message for Worker code: " + code);
+});
+
+test("no API key or Anthropic endpoint in any frontend file (key lives only in the Worker)", () => {
+  const root = path.join(__dirname, ".."), files = ["index.html", "claqe-api.js", "claqe-analyze.js", "claqe-vision.js", "claqe-config.js"];
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(root, f), "utf8");
+    for (const bad of [/sk-ant-/i, /ANTHROPIC_API_KEY/, /x-api-key/i, /api\.anthropic\.com/i]) assert.ok(!bad.test(src), f + " contains " + bad);
+  }
 });

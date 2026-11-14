@@ -68,7 +68,9 @@ describe("/generate validation", () => {
   const bad = {
     "bad JSON": { raw: "nope" }, "null body": { raw: "null" }, "array body": { raw: "[]" },
     "1 clip": { json: { clips: [{ duration: 5 }] } },
-    "5 clips": { json: { clips: Array(5).fill({ duration: 5 }) } },
+    "6 clips": { json: { clips: Array(6).fill({ duration: 5 }) } },
+    "clip over 60s": { json: { clips: [{ duration: 61 }, { duration: 5 }] } },
+    "over 180s combined": { json: { clips: Array(4).fill({ duration: 50 }) } },
     "string duration": { json: { clips: [{ duration: "5" }, { duration: 5 }] } },
     "null clips": { json: { clips: [null, null] } },
     "NaN-like duration": { raw: '{"clips":[{"duration":1e999},{"duration":5}]}' },
