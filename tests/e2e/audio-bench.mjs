@@ -18,7 +18,8 @@ const treeMB = (root) => { // private bytes of the browser process and all its d
 const rootPid = () => Number(execFileSync("powershell.exe", ["-NoProfile", "-Command",
   "(Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | Where-Object { $_.CommandLine -match 'remote-debugging-pipe' -and $_.CommandLine -notmatch '--type=' } | Sort-Object CreationDate | Select-Object -Last 1).ProcessId"], { encoding: "utf8" }).trim()) || NaN;
 const web = staticServer(), port = await listen(web);
-for (const mode of ["video-only", "with-audio"]) {
+const music = process.env.MUSIC; // optional: a music file you have the rights to (adds a "with-audio+music" run)
+for (const mode of ["video-only", "with-audio", ...(music ? ["with-audio+music"] : [])]) {
   const browser = await launch(), pid = rootPid();
   const ctx = await browser.newContext(); await routeRealFfmpeg(ctx);
   const page = await ctx.newPage();
@@ -28,6 +29,11 @@ for (const mode of ["video-only", "with-audio"]) {
   await page.evaluate(() => { window.__exec = []; let t0 = 0; new MutationObserver(() => { const s = document.getElementById("status").textContent; if (/^Making your film/.test(s)) t0 = performance.now(); else if (/^Film ready/.test(s) && t0) { window.__exec.push(performance.now() - t0); t0 = 0; } }).observe(document.getElementById("status"), { childList: true, characterData: true, subtree: true }); });
   await page.setInputFiles("#clips", clips.map((f) => ({ name: path.basename(f), mimeType: "video/mp4", buffer: fs.readFileSync(f) })));
   await page.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 60000 });
+  if (mode.endsWith("music")) {
+    const t0 = Date.now(); await page.setInputFiles("#music", music);
+    await page.waitForFunction(() => /BPM|no clear beat|no steady beat|can't be read/.test(document.getElementById("musicNote").textContent), null, { timeout: 60000 });
+    console.log(`music analysis ${((Date.now() - t0) / 1000).toFixed(1)} s: ${await page.textContent("#musicNote")}`);
+  }
   for (let round = 1; round <= 2; round++) {
     const before = await page.getAttribute("#download", "href");
     let base = pid ? treeMB(pid) : NaN, peak = base, polling = true;

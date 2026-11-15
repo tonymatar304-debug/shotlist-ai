@@ -230,7 +230,7 @@
       }
       if (!cand) continue;
       total += cand.duration; count[key.ci]++;
-      chosen.push({ src: key.ci, start: cand.start, duration: cand.duration, score: Math.round(cand.score * 100) / 100, rep: cand.rep, reason: cand.rep.sem && cand.rep.sem.caption && !cand.rep.sem.avoid ? cand.rep.sem.caption : why(cand.rep.traits) });
+      chosen.push({ src: key.ci, start: cand.start, duration: cand.duration, moment: key.t, score: Math.round(cand.score * 100) / 100, rep: cand.rep, reason: cand.rep.sem && cand.rep.sem.caption && !cand.rep.sem.avoid ? cand.rep.sem.caption : why(cand.rep.traits) });
     }
     for (let k = chosen.length; k < 60 && target - total >= 1; k++) {
       const want = lens[Math.min(k, lens.length - 1)], L0 = Math.min(want, target - total), lensK0 = L0 < 1 ? 1 : L0;
@@ -253,7 +253,7 @@
       total += best.duration; count[best.src]++; chosen.push({ src: best.src, start: best.start, duration: best.duration, score: Math.round(best.sc * 100) / 100, rep: best.rep, reason: best.rep.sem && best.rep.sem.caption && !best.rep.sem.avoid ? best.rep.sem.caption : why(best.rep.traits) });
     }
     const { order, semantic } = orderShots(chosen, clips, style);
-    const plan = order.map((x) => ({ src: x.src, start: x.start, duration: x.duration, score: x.score, reason: x.reason, role: x.role || undefined }));
+    const plan = order.map((x) => ({ src: x.src, start: x.start, duration: x.duration, score: x.score, reason: x.reason, role: x.role || undefined, ...(x.moment !== undefined ? { moment: x.moment } : {}) }));
     return { source: "local-analysis", style, plan, semantic, total: r1(plan.reduce((a, p) => a + p.duration, 0)) };
   }
 

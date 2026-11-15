@@ -48,6 +48,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <script src="claqe-api.js"></script>
 <script src="claqe-analyze.js"></script>
 <script src="claqe-vision.js"></script>
+<script src="claqe-music.js"></script>
 </head>
 <body>
 <main>
@@ -83,8 +84,13 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <p class="smallnote" id="aiNote">The AI plan chooses the order and length of your cuts from clip lengths only. It can't see your footage yet.</p>
 <div id="turnstileBox" hidden></div>
 </section>
+<section class="section" id="musicBox" hidden>
+<label class="label" for="music">Music · optional</label>
+<label class="drop" for="music"><b>Add a music track</b><small>Only use music you have the rights to. Cuts follow its beat; it dips under your clips' sound.</small><input id="music" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac"></label>
+<p class="smallnote" id="musicNote"></p>
+</section>
 <button type="button" class="primary" id="create" disabled>Create my film</button>
-<p class="smallnote">An early preview of CLAQE. Clips stay in your browser; the current render is silent and uses basic editing effects. Footage-aware AI is still in development.</p>
+<p class="smallnote">An early preview of CLAQE. Clips stay in your browser; the render keeps your clips' own sound and uses basic editing effects. Footage-aware AI is still in development.</p>
 <div id="status" class="status" role="status" aria-live="polite">Select your clips to begin.</div>
 <div id="result">
 <h2 style="font:normal 30px 'Instrument Serif',serif;margin:0 0 15px">Your film is ready.</h2>
@@ -124,7 +130,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   function refresh(){
     const status=canRender();
     $("create").disabled=state.busy||!status.ok;
-    $("clips").disabled=state.busy;
+    $("clips").disabled=state.busy;$("music").disabled=state.busy;
     $("clipHint").textContent=state.clips.length?state.clips.length+" of "+maxFiles+" clips selected · "+(bytes(state.clips)/1048576).toFixed(1)+" MB":"No clips selected yet. Select several at once or add them one by one.";
     $("renderNote").textContent=status.msg;
     $("files").replaceChildren();
@@ -211,6 +217,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     const ff=new window.FFmpegWASM.FFmpeg();
     let lastError="";
     ff.on("log",({message})=>{
+      if(state.logTap)state.logTap.push(message);
       if(/Error|Invalid|failed|not found|Unknown encoder/i.test(message))lastError=message.slice(0,200);
     });
     const coreURL=await blobURL(coreBase+"/ffmpeg-core.js","text/javascript");
@@ -257,15 +264,36 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       }catch(e){console.warn("CLAQE audio probe failed, treating clip as silent:",e&&e.message)}
       try{await ff.deleteFile("claqe_probe.txt")}catch(e){}
     }
-    return state.clips.map(c=>window.CLAQE_AUDIO!==false&&c.hasAudio===true);
+    if(window.CLAQE_AUDIO===false)return state.clips.map(()=>false);
+    // Decode each clip's sound once (ebur128 loudness, cached). A stream FFmpeg can't decode makes that clip silent
+    // instead of failing the whole export.
+    for(let i=0;i<state.clips.length;i++){
+      const c=state.clips[i];
+      if(c.hasAudio!==true||c.loud!==undefined)continue;
+      c.loud=await loudness(ff,files[i]);
+      if(!c.loud)console.warn("CLAQE: clip "+(i+1)+" has an audio stream that can't be decoded; it will play silent.");
+    }
+    return state.clips.map(c=>c.hasAudio===true&&!!c.loud);
   }
-  function filterGraph(plan,width,height,audio){
+  // Integrated loudness + sample peak of a file's audio (FFmpeg ebur128). null = no decodable audio.
+  async function loudness(ff,file){
+    state.logTap=[];let code=1;
+    // -v info: the ffprobe call's "-v error" otherwise stays in force inside the shared WASM module and hides the summary
+    try{code=await ff.exec(["-hide_banner","-nostats","-v","info","-i",file,"-vn","-sn","-af","ebur128=peak=sample","-f","null","claqe_null"])}catch(e){console.warn("CLAQE loudness check failed:",e&&e.message)}
+    const log=state.logTap.join("\n");state.logTap=null;
+    const r=code===0?ClaqeMusic.parseLoudness(log):null;
+    if(!r)console.warn("CLAQE loudness: exit "+code+" · "+log.slice(-300).replace(/\s+/g," "));
+    return r;
+  }
+  // mix: null (video only) or {audio:[bool per clip], gains:[dB per clip], music:{input,gain,end}|null}
+  function filterGraph(plan,width,height,mix){
+    const audio=mix&&mix.audio,music=mix&&mix.music;
     const grades={
       cinematic:"contrast=1.08:saturation=0.9:gamma=0.97",
       dynamic:"contrast=1.13:saturation=1.12:gamma=1.0",
       vintage:"contrast=0.98:saturation=0.78:gamma=1.04"
     };
-    const segments=[],withAudio=!!audio&&audio.some(Boolean);
+    const segments=[],withAudio=!!audio&&plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
     for(let i=0;i<plan.length;i++){
       const item=plan[i],n=shotFrames(item),dur=n/24,fadeOut=Math.max(.1,dur-.22).toFixed(2);
       const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
@@ -278,14 +306,23 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       if(!withAudio)continue;
       // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
       // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
-      const samples=n*2000,src=item.src===undefined?i:item.src;
+      const samples=n*2000,src=item.src===undefined?i:item.src,gain=mix.gains&&mix.gains[src]||0;
       segments.push(audio[src]
-        ?"["+i+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=end_sample="+samples+
+        ?"["+i+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,"+(gain?"volume="+gain+"dB,":"")+"apad,atrim=end_sample="+samples+
           ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-.02).toFixed(3)+":d=0.02[a"+i+"]"
         :"anullsrc=r=48000:cl=stereo,atrim=end_sample="+samples+"[a"+i+"]");
     }
     const inputs=plan.map((_,i)=>"[v"+i+"]"+(withAudio?"[a"+i+"]":"")).join("");
-    segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film][aud]":"0[film]"));
+    segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film]"+(music?"[orig]":"[aud]"):"0[film]"));
+    if(music){
+      // Music: from its first sound, levelled, smooth fade in/out, silence after it ends (never longer than the film).
+      const total=plan.reduce((s,p)=>s+shotFrames(p),0)/24,end=Math.min(total,music.end),fd=Math.min(2,end/3);
+      segments.push("["+music.input+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,volume="+music.gain+"dB,"+
+        "apad,atrim=end_sample="+Math.round(total*48000)+",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.6,afade=t=out:st="+(end-fd).toFixed(3)+":d="+fd.toFixed(3)+(withAudio?"[mus]":"[aud]"));
+      // Ducking: the clips' own sound pushes the music down (sidechain), then both are summed and a limiter stops clipping.
+      if(withAudio)segments.push("[orig]asplit=2[o1][o2];[mus][o2]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=400[duck];"+
+        "[o1][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.94:level=0:latency=1[aud]");
+    }
     segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
   }
@@ -463,18 +500,53 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       }
       await ff.writeFile("claqe_mark.png",await makeWatermark());paths.push("claqe_mark.png");
       const [width,height]=state.format==="vertical"?[360,640]:[640,360];
-      const command=[];
-      // One input per shot, seeked to its start (-ss before -i): FFmpeg decodes only the footage it uses, and a clip can be
-      // reused out of time order (one shared input trimmed several times went black after the first backwards jump).
-      plan.forEach((item,i)=>command.push("-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",files[item.src===undefined?i:item.src]));
-      command.push("-loop","1","-i","claqe_mark.png");
-      const audio=await probeAudio(ff,files),withAudio=plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
-      command.push("-filter_complex",filterGraph(plan,width,height,withAudio?audio:null));
-      command.push("-map","[out]",...(withAudio?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),"-c:v","libx264","-preset","ultrafast","-crf","28",
-        "-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",
-        String(plan.reduce((sum,p)=>sum+shotFrames(p),0)/24),"claqe_film.mp4");
+      const audio=await probeAudio(ff,files),notes=[];
+      const gains=ClaqeMusic.levelGains(state.clips.map((c,i)=>audio[i]?c.loud:null),null).clips;
+      state.clips.forEach((c,i)=>{if(c.hasAudio&&!audio[i]&&window.CLAQE_AUDIO!==false)notes.push("Clip "+(i+1)+"'s sound couldn't be read, so it plays silent.")});
+      // Optional music (local development): decodable by FFmpeg too, levelled, and cuts moved onto its beats.
+      let music=null;
+      const m=state.music;
+      if(m&&!m.error&&window.CLAQE_AUDIO!==false){
+        const mf="claqe_music."+(m.file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g,"")||"audio");
+        await ff.writeFile(mf,new Uint8Array(await m.file.arrayBuffer()));paths.push(mf);
+        const ml=await loudness(ff,mf);
+        const lv=ml&&ClaqeMusic.levelGains(state.clips.map((c,i)=>audio[i]?c.loud:null),ml);
+        if(!ml)notes.push("The music file couldn't be read by the renderer, so the film has no music.");
+        else if(lv.musicGain===null)notes.push("The music track is silent, so it was left out.");
+        else{
+          music={file:mf,input:plan.length+1,gain:lv.musicGain,start:m.start,end:m.duration-m.start};
+          if(m.beats.length){
+            const info=state.clips.map(c=>{const a=c.analysis;return {duration:c.duration,
+              cuts:a?ClaqeAnalyze.sceneRanges(a).slice(1).map(r=>r.start):[],avoid:a?a.samples.filter(s=>s.sem&&s.sem.avoid&&s.sem.w>0.6).map(s=>s.t):[]}});
+            const al=ClaqeMusic.alignToBeats(plan.map((p,i)=>({...p,src:p.src===undefined?i:p.src})),info,m.beats,{film:LIMITS.filmSeconds,style:state.style});
+            plan=al.plan;
+            notes.push("Music: "+al.aligned+" of "+(plan.length-1)+" cuts on the "+(m.kind==="beats"?"beat (~"+Math.round(m.tempo)+" BPM)":"music's accents")+(plan.some((p,i)=>audio[p.src])?"; music dips under your clips' sound.":"."));
+          }else notes.push("Music added; no clear beat found, so the cuts keep their timing.");
+        }
+      }
+      const withAudio=plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
+      const total=String(plan.reduce((sum,p)=>sum+shotFrames(p),0)/24);
+      const buildCommand=mix=>{
+        const command=["-y"];
+        // One input per shot, seeked to its start (-ss before -i): FFmpeg decodes only the footage it uses, and a clip can be
+        // reused out of time order (one shared input trimmed several times went black after the first backwards jump).
+        plan.forEach((item,i)=>command.push("-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",files[item.src===undefined?i:item.src]));
+        command.push("-loop","1","-i","claqe_mark.png");
+        if(mix&&mix.music)command.push("-ss",String(mix.music.start),"-t",String(Math.round((+total+1)*100)/100),"-i",mix.music.file);
+        command.push("-filter_complex",filterGraph(plan,width,height,mix));
+        command.push("-map","[out]",...(mix?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),"-c:v","libx264","-preset","ultrafast","-crf","28",
+          "-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",total,"claqe_film.mp4");
+        return command;
+      };
+      let mix=withAudio||music?{audio,gains,music}:null;
+      window.__claqeLast={plan,mix,loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
       setStatus("Making your film… Browser encoding may take several minutes. Keep this tab open.");
-      const code=await ff.exec(command);
+      let code=await ff.exec(buildCommand(mix));
+      if(code!==0&&mix){ // never lose the film because of sound: render once more without audio
+        console.warn("CLAQE: render with audio failed ("+(state.lastError?state.lastError():"")+"), retrying video-only.");
+        notes.length=0;notes.push("The sound couldn't be rendered, so this film is silent.");mix=null;
+        code=await ff.exec(buildCommand(null));
+      }
       if(code!==0)throw new Error("The renderer stopped (code "+code+"). "+(state.lastError?state.lastError():""));
       const data=await ff.readFile("claqe_film.mp4");
       if(!data||data.byteLength<1000)throw new Error("The rendered file was empty.");
@@ -484,7 +556,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       $("download").href=state.outputURL;
       $("result").style.display="block";
       $("resultNote").textContent=source==="local-analysis"||source==="ai-vision"?ClaqeAPI.describeSource(source)+" · "+shotNotes(plan)+(aiPlan&&aiPlan.note?" · "+aiPlan.note:"")+" · watermark embedded.":aiEnabled?ClaqeAPI.describeSource(source)+" · the CLAQE watermark is embedded in the video.":"Preview export · the CLAQE watermark is embedded in the video.";
-      $("resultNote").textContent+=withAudio?" Original clip audio kept"+(audio.every(Boolean)?".":" (silent clips stay silent)."):"";
+      $("resultNote").textContent+=(mix&&withAudio?" Original clip audio kept"+(gains.some(g=>g)?", volume levelled":"")+(plan.every((p,i)=>audio[p.src===undefined?i:p.src])?".":" (silent clips stay silent)."):"")+(notes.length?" "+notes.join(" "):"");
       setStatus(source==="ai-vision"?"Film ready! An AI model described sampled frames and CLAQE combined that with local motion and quality analysis; grading and motion are style presets.":source==="local-analysis"?"Film ready! Moments were chosen by local footage analysis (motion, sharpness, exposure, scene cuts), not by AI; grading and motion are style presets.":source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
       paths.push("claqe_film.mp4");
       $("result").scrollIntoView({behavior:"smooth",block:"start"});
@@ -498,6 +570,22 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     }
   }
   $("create").addEventListener("click",create);
+  // Optional music track: local development only for now (localhost, or window.CLAQE_MUSIC=true). Analysed in the browser.
+  if(isLocal||window.CLAQE_MUSIC===true){
+    $("musicBox").hidden=false;
+    $("music").addEventListener("change",async e=>{
+      const file=e.target.files&&e.target.files[0],note=$("musicNote");state.music=null;
+      if(!file){note.textContent="";return}
+      if(file.size>12*MB){note.textContent="Music files can be up to 12 MB for now.";return}
+      note.textContent="Listening for the beat…";
+      try{
+        const d=await ClaqeMusic.decodeMusic(file),from=Math.round(d.start*d.sr);
+        const b=ClaqeMusic.detectBeats(d.samples.subarray(from,Math.min(d.samples.length,from+Math.round((LIMITS.filmSeconds+5)*d.sr))),d.sr);
+        state.music={file,start:d.start,duration:d.duration,kind:b.kind,tempo:b.tempo,beats:b.beats};
+        note.textContent=file.name+" · "+d.duration.toFixed(0)+" s · "+(b.kind==="beats"?"steady beat, ~"+Math.round(b.tempo)+" BPM":b.kind==="accents"?"no steady beat; cuts follow its accents":"no clear beat; cuts keep their timing");
+      }catch(err){console.warn("CLAQE music decode failed:",err&&err.message);note.textContent="This audio file can't be read here. Try MP3, M4A or WAV."}
+    });
+  }
   refresh();
 })();
 </script>
