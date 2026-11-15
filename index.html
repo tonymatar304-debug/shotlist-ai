@@ -49,6 +49,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <script src="claqe-analyze.js"></script>
 <script src="claqe-vision.js"></script>
 <script src="claqe-music.js"></script>
+<script src="claqe-look.js"></script>
 </head>
 <body>
 <main>
@@ -286,13 +287,14 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     return r;
   }
   // mix: null (video only) or {audio:[bool per clip], gains:[dB per clip], music:{input,gain,end}|null}
-  function filterGraph(plan,width,height,mix){
+  // Per-shot grade (claqe-look.js): shots matched to each other from the footage analysis, then the style's look.
+  function shotLooks(plan){
+    const stats=plan.map((p,i)=>{const c=state.clips[p.src===undefined?i:p.src],a=c&&c.analysis;return a&&window.CLAQE_MATCH!==false?ClaqeLook.shotStats(a.samples,p.start,p.duration):null});
+    return ClaqeLook.matchLooks(stats,state.style).map(ClaqeLook.lookFilter);
+  }
+  function filterGraph(plan,width,height,mix,looks){
     const audio=mix&&mix.audio,music=mix&&mix.music;
-    const grades={
-      cinematic:"contrast=1.08:saturation=0.9:gamma=0.97",
-      dynamic:"contrast=1.13:saturation=1.12:gamma=1.0",
-      vintage:"contrast=0.98:saturation=0.78:gamma=1.04"
-    };
+    looks=looks||shotLooks(plan);
     const segments=[],withAudio=!!audio&&plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
     const last=plan.length-1;
     for(let i=0;i<plan.length;i++){
@@ -305,7 +307,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       segments.push("["+i+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
         "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
         "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
-        "eq="+grades[state.style]+fades+",format=yuv420p[v"+i+"]");
+        looks[i]+fades+",format=yuv420p[v"+i+"]");
       if(!withAudio)continue;
       // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
       // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
@@ -542,7 +544,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         return command;
       };
       let mix=withAudio||music?{audio,gains,music}:null;
-      window.__claqeLast={plan,mix,loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
+      window.__claqeLast={plan,mix,looks:shotLooks(plan),loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
       setStatus("Making your film… Browser encoding may take several minutes. Keep this tab open.");
       let code=await ff.exec(buildCommand(mix));
       if(code!==0&&mix){ // never lose the film because of sound: render once more without audio

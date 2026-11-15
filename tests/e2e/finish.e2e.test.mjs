@@ -11,8 +11,9 @@ let web, port, browser;
 before(async () => { web = staticServer(); port = await listen(web); browser = await launch(); });
 after(async () => { await browser?.close(); web?.close(); });
 
-// Mean luma (0..1) of the centre of the given frame numbers of the exported film.
-async function frameLuma(page, frames) {
+const frameLuma = async (page, frames) => (await frameRGB(page, frames)).map((p) => p.y);
+// Mean colour (0..1: y, r, g, b) of the centre of the given frame numbers of the exported film.
+async function frameRGB(page, frames) {
   return page.evaluate(async (frames) => {
     const film = new Uint8Array(await (await fetch(document.getElementById("download").href)).arrayBuffer());
     const base = "https://cdn.jsdelivr.net/npm/", blob = async (u, t) => URL.createObjectURL(new Blob([await (await fetch(u)).arrayBuffer()], { type: t }));
@@ -20,9 +21,10 @@ async function frameLuma(page, frames) {
     await ff.load({ coreURL: await blob(base + "@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js", "text/javascript"), wasmURL: await blob(base + "@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm", "application/wasm") });
     await ff.writeFile("f.mp4", film);
     const want = [...new Set(frames)].sort((a, b) => a - b);
-    await ff.exec(["-i", "f.mp4", "-vf", "select='" + want.map((n) => "eq(n," + n + ")").join("+") + "',crop=iw/2:ih/2,scale=16:16", "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "gray", "o.raw"]);
+    await ff.exec(["-i", "f.mp4", "-vf", "select='" + want.map((n) => "eq(n," + n + ")").join("+") + "',crop=iw/2:ih/2,scale=16:16", "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "o.raw"]);
     const raw = await ff.readFile("o.raw"), out = {};
-    want.forEach((n, k) => { let s = 0; for (let i = 0; i < 256; i++) s += raw[k * 256 + i]; out[n] = s / 256 / 255; });
+    want.forEach((n, k) => { let r = 0, g = 0, b = 0; for (let i = 0; i < 256; i++) { const o = (k * 256 + i) * 3; r += raw[o]; g += raw[o + 1]; b += raw[o + 2]; }
+      r /= 256 * 255; g /= 256 * 255; b /= 256 * 255; out[n] = { y: 0.2126 * r + 0.7152 * g + 0.0722 * b, r, g, b }; });
     ff.terminate();
     return frames.map((n) => out[n]);
   }, frames);
@@ -56,4 +58,39 @@ test("hard cuts between shots; fade in from black at the start and out to black 
     cut.forEach((v, i) => assert.ok(v > minMid * 0.85, `no dip at cut ${i >> 1}: ${v.toFixed(3)} vs ${minMid.toFixed(3)}`));
   }
   await ctx.close();
+});
+
+test("shot matching: exposure spread and a warm cast are reduced, conservatively; same plan without matching for comparison", async () => {
+  const plan = [{ src: 0, start: 0.5, duration: 2 }, { src: 1, start: 0.5, duration: 2 }, { src: 2, start: 0.5, duration: 2 }, { src: 1, start: 2.5, duration: 1.5 }];
+  const res = {};
+  for (const match of [false, true]) {
+    const ctx = await browser.newContext(); await routeRealFfmpeg(ctx);
+    const page = await ctx.newPage();
+    await page.addInitScript(({ match, plan }) => { window.CLAQE_MATCH = match; window.__fixedPlan = plan; }, { match, plan });
+    await page.goto(`http://localhost:${port}/index.html`);
+    // fixed plan (the analysis still runs, so the grade sees the footage)
+    await page.evaluate(() => { const o = window.ClaqeAnalyze.planFilm; window.ClaqeAnalyze.planFilm = (...a) => ({ ...o(...a), plan: window.__fixedPlan }); });
+    await page.click('button[data-style="dynamic"]');
+    await page.setInputFiles("#clips", ["tex-dark-4s.mp4", "tex-bright-4s.mp4", "tex-warm-4s.mp4"].map(fx));
+    await page.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 30000 });
+    await page.click("#create");
+    await page.waitForFunction(() => /Film ready|Export failed/.test(document.getElementById("status").textContent), null, { timeout: 240000 });
+    assert.match(await page.textContent("#status"), /Film ready/);
+    const last = await page.evaluate(() => window.__claqeLast);
+    assert.deepEqual(last.plan.map((p) => p.src), [0, 1, 2, 1], "fixed plan used");
+    const mids = [24, 72, 120, 162]; // middles of the 2 s, 2 s, 2 s, 1.5 s shots
+    res[match] = { px: await frameRGB(page, mids), looks: last.looks };
+    await ctx.close();
+  }
+  const sd = (a) => { const m = a.reduce((s, x) => s + x, 0) / a.length; return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); };
+  const [off, on] = [res[false], res[true]], ys = (r) => r.px.map((p) => p.y), rb = (p) => p.r - p.b;
+  console.log(`# luma off ${ys(off).map((v) => v.toFixed(3))} on ${ys(on).map((v) => v.toFixed(3))}; warm R-B off ${rb(off.px[2]).toFixed(3)} on ${rb(on.px[2]).toFixed(3)}`);
+  console.log(`# looks on: ${on.looks.join(" | ")}`);
+  assert.ok(off.looks.every((l) => l === off.looks[0]), "without matching every shot has the same look");
+  assert.ok(new Set(on.looks).size >= 3, "matched shots get their own grade");
+  assert.ok(sd(ys(on)) < sd(ys(off)) * 0.8, "exposure spread reduced");
+  assert.ok(on.px[0].y > off.px[0].y + 0.02 && on.px[1].y < off.px[1].y - 0.02, "dark shot lifted, bright shot lowered");
+  assert.ok(on.px[0].y < on.px[1].y - 0.2, "conservative: shots keep their own exposure order and character");
+  assert.ok(rb(on.px[2]) < rb(off.px[2]) - 0.01 && rb(on.px[2]) > 0.02, "warm cast reduced, not removed");
+  assert.ok(Math.abs(on.px[1].y - on.px[3].y) < 0.03, "same footage, same grade");
 });

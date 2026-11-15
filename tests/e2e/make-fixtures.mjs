@@ -41,6 +41,11 @@ const patch = { "bad-audio-6s.mp4": { from: "beep-flash-6s.mp4", fn: (b) => {
   const i = b.indexOf("mp4a"); if (i < 0) throw new Error("no mp4a"); b.write("zzzz", i, "latin1");
   // esds DecoderConfigDescriptor: objectTypeIndication 0x40 (AAC) + streamType byte 0x15 -> unknown object type 0xFE
   const e = b.indexOf("esds", i), o = b.indexOf(Buffer.from([0x40, 0x15]), e); if (e < 0 || o < 0 || o - e > 40) throw new Error("no esds"); b[o] = 0xfe; return b; } } };
+// Textured, low-saturation clips for grade matching: dark, bright, and a warm (orange) white-balance cast.
+const tex = (c) => ["-f", "lavfi", "-i", `color=c=${c}:s=320x180:d=4:r=24,noise=alls=24:allf=t+u`, ...enc];
+jobs["tex-dark-4s.mp4"] = tex("0x2c2c2c");
+jobs["tex-bright-4s.mp4"] = tex("0xb4b4b4");
+jobs["tex-warm-4s.mp4"] = tex("0x947c64");
 const web = staticServer(); const port = await listen(web);
 const browser = await launch(); const ctx = await browser.newContext(); await routeRealFfmpeg(ctx);
 const page = await ctx.newPage();

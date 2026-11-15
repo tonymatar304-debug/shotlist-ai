@@ -40,9 +40,17 @@
     return t;
   }
   // One time sample from frames at t (g0) and t+dt (g1, optional).
-  function featurize(t, g0, g1) {
+  // col (optional): { rgb: [mean R, G, B] 0..1, sat: mean (max-min) 0..1 } of the colour frame, used for grading.
+  function featurize(t, g0, g1, col) {
     const s = stats(g0); const m = g1 ? pairMotion(g0, g1) : { mad: 0, pan: 0, resid: 0 };
-    return { t: Math.round(t * 100) / 100, bright: s.bright, contrast: s.contrast, sharp: s.sharp, hist: s.hist, tiny: Array.from(down(g0)), motion: m.mad, pan: m.pan, resid: m.resid, scene: 0 };
+    return { t: Math.round(t * 100) / 100, bright: s.bright, contrast: s.contrast, sharp: s.sharp, hist: s.hist, tiny: Array.from(down(g0)), motion: m.mad, pan: m.pan, resid: m.resid, scene: 0,
+      ...(col ? { rgb: col.rgb, sat: col.sat } : {}) };
+  }
+  function colourStats(d) { // RGBA bytes
+    let r = 0, g = 0, b = 0, s = 0; const n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; s += Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]); }
+    const k = 1 / (n * 255), q = (x) => Math.round(x * k * 1000) / 1000;
+    return { rgb: [q(r), q(g), q(b)], sat: q(s) };
   }
   // Visual distance between two samples (0..1): colour/brightness distribution + layout.
   function sceneDistance(a, b) {
@@ -268,8 +276,8 @@
       await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("video did not load")), 15000); video.onloadeddata = () => { clearTimeout(to); res(); }; video.onerror = () => { clearTimeout(to); rej(new Error("video cannot be decoded")); }; });
       const seek = (t) => new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("seek timeout")), 8000); video.onseeked = () => { clearTimeout(to); res(); }; video.currentTime = Math.min(Math.max(0, t), Math.max(0, duration - 0.05)); });
       const grab = async (t) => { await seek(t); await new Promise((r) => requestAnimationFrame(() => r())); g.drawImage(video, 0, 0, W, H);
-        const d = g.getImageData(0, 0, W, H).data, o = new Uint8Array(W * H); for (let i = 0; i < o.length; i++) o[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; return o; };
-      const sampleAt = async (t) => { const a = await grab(t); const b = t + MOTION_DT < duration - 0.05 ? await grab(t + MOTION_DT) : null; const s = featurize(t, a, b); if (onSample) onSample(s); return s; };
+        const d = g.getImageData(0, 0, W, H).data, o = new Uint8Array(W * H); for (let i = 0; i < o.length; i++) o[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; o.col = colourStats(d); return o; };
+      const sampleAt = async (t) => { const a = await grab(t); const b = t + MOTION_DT < duration - 0.05 ? await grab(t + MOTION_DT) : null; const s = featurize(t, a, b, a.col); if (onSample) onSample(s); return s; };
       const samples = [];
       for (let t = step / 2; t < duration - 0.1; t += step) { if (signal && signal.aborted) throw new Error("cancelled"); samples.push(await sampleAt(t)); }
       if (!samples.length) samples.push(await sampleAt(Math.max(0, duration / 2)));
@@ -281,5 +289,5 @@
     } finally { video.removeAttribute("src"); try { video.load(); } catch (_) {} URL.revokeObjectURL(url); }
   }
 
-  return { analyzeClip, planFilm, orderShots, clipStory, findRanges, scoreClip, sceneRanges, shotLengths, featurize, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
+  return { analyzeClip, planFilm, orderShots, clipStory, findRanges, scoreClip, sceneRanges, shotLengths, featurize, colourStats, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
 });
