@@ -59,10 +59,20 @@ function metrics(p, vision, req, analysed) {
   return { shots: p.plan.length, meanLen: +(p.total / p.plan.length).toFixed(2), lens: lens.join(","), total: p.total,
     perClip: req.clips.map((c) => +p.plan.filter((x) => x.src === c.index).reduce((t, x) => t + x.duration, 0).toFixed(1)).join("/"),
     scenesUsed: scenes.size, highlightSecs: +secs(["highlight"]).toFixed(1), avoidSecs: +secs(["avoid"]).toFixed(1),
+    clipSequence: p.plan.map((x) => x.src).filter((v, i, a) => !i || a[i - 1] !== v).join(""),
+    roleSequence: p.plan.map((x) => ({ opener: "O", highlight: "H", closer: "C", filler: "f" })[x.role] || "-").join(""),
+    progressionsKept: analysed.map((c, ci) => (A.clipStory(c).progression ? p.plan.filter((x) => x.src === ci).every((x, i, a) => !i || x.start > a[i - 1].start) : null)).filter((x) => x !== null).every(Boolean),
     opensOnOpener: !!first && fr.some((f) => f.ci === first.src && f.role === "opener" && near(first, f, 1) > 0),
     endsOnCloser: !!last && fr.some((f) => f.ci === last.src && f.role === "closer" && near(last, f, 1) > 0) };
 }
 const sharedSecs = (a, b) => a.plan.reduce((t, x) => t + b.plan.filter((y) => y.src === x.src).reduce((u, y) => u + Math.max(0, Math.min(x.start + x.duration, y.start + y.duration) - Math.max(x.start, y.start)), 0), 0);
+// order change at film level: share of clip pairs whose first appearance swaps between the two plans (0 = same order, 1 = reversed)
+function orderChange(a, b) {
+  const fa = new Map(), fb = new Map(); a.plan.forEach((x, i) => fa.has(x.src) || fa.set(x.src, i)); b.plan.forEach((x, i) => fb.has(x.src) || fb.set(x.src, i));
+  const ids = [...fa.keys()].filter((k) => fb.has(k)); let n = 0, d = 0;
+  for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) { n++; if (Math.sign(fa.get(ids[i]) - fa.get(ids[j])) !== Math.sign(fb.get(ids[i]) - fb.get(ids[j]))) d++; }
+  return n ? +(d / n).toFixed(2) : 0;
+}
 const clone = (o) => JSON.parse(JSON.stringify(o));
 function compare(vision) {
   for (const style of ["cinematic", "dynamic", "vintage"]) {
@@ -71,7 +81,7 @@ function compare(vision) {
     let ai = null;
     if (vision) { const an = clone(prep.analysed); V.applyVision(an, prep.request, vision); ai = A.planFilm(an, style, FILM); console.log(`[${style}] AI   : ${fmt(ai)}`); console.log("   AI reasons:", ai.plan.map((x) => x.reason).join(" | ")); }
     console.log("   local metrics:", JSON.stringify(metrics(local, vision, prep.request, prep.analysed)));
-    if (ai) { console.log("   AI metrics   :", JSON.stringify(metrics(ai, vision, prep.request, prep.analysed))); console.log(`   same footage in both: ${sharedSecs(local, ai).toFixed(1)} of ${local.total}s; same order: ${fmt(local) === fmt(ai)}`); }
+    if (ai) { console.log("   AI metrics   :", JSON.stringify(metrics(ai, vision, prep.request, prep.analysed))); console.log(`   same footage in both: ${sharedSecs(local, ai).toFixed(1)} of ${local.total}s; same order: ${fmt(local) === fmt(ai)}; clip-order change ${orderChange(local, ai)}; AI plan uses roles: ${ai.semantic}`); }
   }
 }
 
@@ -82,6 +92,7 @@ console.log(`frames: ${prep.request.clips.reduce((n, c) => n + c.frames.length, 
 console.log(`estimate: ~${estIn} input tokens (${imgTokens} image), <= ${MAX_OUT} output -> <= $${((estIn * PRICE_IN + MAX_OUT * PRICE_OUT) / 1e6).toFixed(5)} per film`);
 console.log("frame times:", prep.request.clips.map((c) => `clip${c.index}: ` + c.frames.map((f) => f.t).join(",")).join(" | "));
 if (REPLAY) { const v = V.validateVisionResponse(prep.vision, prep.request); console.log("story:", v.story); compare(v); process.exit(0); }
+if (!paid && process.env.CLAQE_SAVE_DRY) { fs.mkdirSync(path.join(here, "runs"), { recursive: true }); fs.writeFileSync(path.join(here, "runs", "dry.json"), JSON.stringify({ request: prep.request, dims: prep.dims, analysed: prep.analysed })); console.log("saved manual/runs/dry.json (no images, no AI)"); }
 if (!paid) { compare(null); console.log("\nDRY RUN: no request sent. Set CLAQE_CONFIRM_PAID=yes and CLAQE_ENV_FILE to make ONE paid call."); process.exit(0); }
 
 // 2) ONE real call through the local Worker (real /vision code path, local D1, test Turnstile). The run is saved for free replays.

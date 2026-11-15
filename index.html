@@ -394,7 +394,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   }
   // Local footage analysis (claqe-analyze.js): whole-clip sampling + deterministic planner. Not AI. Cached per clip.
   async function localPlan(){
-    state.clips.forEach(c=>{if(c.analysis)c.analysis.samples.forEach(s=>{delete s.sem})}); // local-only plans never carry old semantic data
+    state.clips.forEach(c=>{if(c.analysis){delete c.analysis.vision;c.analysis.samples.forEach(s=>{delete s.sem})}}); // local-only plans never carry old semantic data
     const n=state.clips.length,out=[];
     for(let i=0;i<n;i++){
       const c=state.clips[i];

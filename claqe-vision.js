@@ -63,6 +63,7 @@
     const byId = new Map(vision.frames.map((f) => [f.id, f]));
     analysed.forEach((clip, ci) => {
       clip.samples.forEach((s) => { delete s.sem; });
+      clip.vision = req.clips[ci].frames.map((rf) => byId.get(rf.id)).filter(Boolean).map((f) => ({ t: f.t, role: f.role === "avoid" || !f.usable || f.shotType === "title" ? "avoid" : f.role, confidence: f.confidence, importance: f.importance }));
       for (const rf of req.clips[ci].frames) {
         const f = byId.get(rf.id); if (!f) continue;
         const avoid = f.role === "avoid" || !f.usable || f.shotType === "title";
@@ -71,7 +72,7 @@
           const lo = Math.min(s.t, rf.t), hi = Math.max(s.t, rf.t);
           if (clip.samples.some((x) => x.t > lo && x.t <= hi && x.scene > 0.3)) continue; // different scene
           const w = (1 - dt / 2.5) * (0.4 + 0.6 * f.confidence);
-          if (!s.sem || w > s.sem.w) s.sem = { w, importance: 0.5 + (f.importance - 0.5) * w, avoid: avoid && f.confidence >= 0.4, must: f.role === "highlight" || f.role === "opener", caption: caption(f), role: f.role };
+          if (!s.sem || w > s.sem.w) s.sem = { w, importance: 0.5 + (f.importance - 0.5) * w, avoid: avoid && f.confidence >= 0.4, must: f.role === "highlight" || f.role === "opener" || f.role === "closer", caption: caption(f), role: f.role, conf: f.confidence };
         }
       }
     });

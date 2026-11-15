@@ -126,6 +126,74 @@
     if (t.camera > 0.45 && t.shake < 0.2) p.push("steady/deliberate camera"); if (t.novelty > 0.65) p.push("distinct look"); if (t.exposure > 0.85) p.push("well exposed");
     return p.length ? p.join(", ") : "best available moment";
   }
+  // ---------- story-aware ordering (uses validated AI observations when present; otherwise the local order) ----------
+  const STAGE = { opener: 0, filler: 1, highlight: 1, closer: 2 };
+  const RELIABLE = 0.5; // minimum model confidence for an observation to shape order
+  // Per clip: reliable observed frames, and whether they show a progression (opener -> ... -> closer in time) or contradict one.
+  function clipStory(clip) {
+    const fr = (clip.vision || []).filter((f) => f.confidence >= RELIABLE && f.role !== "avoid" && STAGE[f.role] !== undefined).sort((a, b) => a.t - b.t);
+    let mono = true; for (let i = 1; i < fr.length; i++) if (STAGE[fr[i].role] < STAGE[fr[i - 1].role]) mono = false;
+    const span = fr.length >= 2 && STAGE[fr[fr.length - 1].role] > STAGE[fr[0].role];
+    return { frames: fr, progression: mono && span, conflict: !mono };
+  }
+  // Role of a chosen shot: the strongest reliable observation inside it (ignored for clips whose observations contradict).
+  function shotRole(x, clip, story) {
+    if (story.conflict) return null;
+    let best = null;
+    for (const s of clip.samples) if (s.sem && s.t >= x.start - 0.25 && s.t <= x.start + x.duration + 0.25 && !s.sem.avoid && s.sem.conf >= RELIABLE && s.sem.w >= 0.35 && (!best || s.sem.w * s.sem.importance > best.w * best.importance)) best = s.sem;
+    return best ? { role: best.role, strength: best.w * best.importance * best.conf } : null;
+  }
+  // Order shots. Without reliable observations this is exactly the local style order.
+  // With them: cinematic builds an arc (opening clip first, highlights rising, closing clip last); vintage keeps the memory-like
+  // upload order and only moves a confidently labelled opener/closer clip; dynamic opens on a hook and lands on a closer.
+  // Within a clip whose observations show a progression (e.g. bud -> bloom) shots always stay chronological.
+  function orderShots(chosen, clips, style) {
+    const stories = clips.map(clipStory);
+    chosen.forEach((x) => { const r = shotRole(x, clips[x.src], stories[x.src]); x.role = r ? r.role : null; x.strength = r ? r.strength : 0; });
+    const semantic = chosen.some((x) => x.role);
+    const chrono = (a, b) => a.src - b.src || a.start - b.start;
+    const best = (role, pool, min = 0) => pool.filter((x) => x.role === role && x.strength >= min).sort((a, b) => b.strength - a.strength || chrono(a, b))[0] || null;
+    const firstOf = (ci) => chosen.filter((x) => x.src === ci).sort(chrono)[0], lastOf = (ci) => chosen.filter((x) => x.src === ci).sort(chrono).slice(-1)[0];
+    const prog = (ci) => stories[ci].progression;
+    if (style === "dynamic") {
+      // hook: AI opener, else strongest AI highlight, else local strongest; it must not jump ahead of its own clip's progression
+      let hook = semantic ? best("opener", chosen) || best("highlight", chosen) : null;
+      if (hook && prog(hook.src) && hook !== firstOf(hook.src)) hook = firstOf(hook.src);
+      if (!hook) hook = chosen.slice().sort((a, b) => b.score - a.score)[0];
+      let closer = semantic ? best("closer", chosen.filter((x) => x !== hook)) : null;
+      if (closer && prog(closer.src) && closer !== lastOf(closer.src)) closer = null; // would break the progression
+      const rest = chosen.filter((x) => x !== hook && x !== closer).sort(chrono), byClip = clips.map((_, ci) => rest.filter((x) => x.src === ci)), order = hook ? [hook] : [];
+      // hook taken from mid-clip without progression: the clip's earlier shots still follow (fine for dynamic cutting)
+      while (byClip.some((q) => q.length)) for (const q of byClip) if (q.length) order.push(q.shift());
+      if (closer) order.push(closer);
+      return { order, semantic };
+    }
+    const blocks = [...new Set(chosen.map((x) => x.src))].sort((a, b) => a - b).map((ci) => ({ ci, shots: chosen.filter((x) => x.src === ci).sort(chrono) }));
+    if (!semantic) return { order: blocks.flatMap((b) => b.shots), semantic };
+    const min = style === "vintage" ? 0.35 : 0; // vintage only reorders for strong, confident labels
+    const op = best("opener", chosen, min);
+    // one clip that holds both the opening and the closing moment (e.g. bud -> bloom) is split around the other clips:
+    // its earlier shots open the film, its closing shot ends it - still chronological within the clip
+    const same = op && style === "cinematic" ? best("closer", chosen.filter((x) => x.src === op.src && x.start > op.start), min) : null;
+    if (same && same === blocks.find((b) => b.ci === op.src).shots.slice(-1)[0]) {
+      const hb = blocks.find((b) => b.ci === op.src);
+      blocks.splice(blocks.indexOf(hb), 1, { ci: hb.ci, shots: hb.shots.slice(0, -1) }, { ci: hb.ci, shots: [same], tail: true });
+    }
+    const cl = same || best("closer", chosen.filter((x) => !op || x.src !== op.src), min);
+    const head = op ? blocks.find((b) => b.ci === op.src && !b.tail) : null, tail = cl ? blocks.find((b) => b.ci === cl.src && (b.tail || !same)) : null;
+    let middle = blocks.filter((b) => b !== head && b !== tail);
+    if (style === "cinematic") { // rising action: blocks with stronger highlights later (stable for ties)
+      const peak = (b) => Math.max(0, ...b.shots.filter((x) => x.role === "highlight").map((x) => x.strength));
+      middle = middle.map((b, i) => ({ b, i, p: peak(b) })).sort((a, b) => a.p - b.p || a.i - b.i).map((o) => o.b);
+      // inside a clip WITHOUT a progression, its own opener leads and its closer ends the block
+      for (const b of [head, ...middle, tail].filter(Boolean)) if (!prog(b.ci)) {
+        const o = b.shots.find((x) => x.role === "opener"), c = b.shots.find((x) => x.role === "closer" && x !== o);
+        if (o) b.shots = [o, ...b.shots.filter((x) => x !== o)];
+        if (c) b.shots = [...b.shots.filter((x) => x !== c), c];
+      }
+    }
+    return { order: [head, ...middle, tail].filter(Boolean).flatMap((b) => b.shots), semantic };
+  }
   // clips: [{duration, samples}]. Returns { plan:[{src,start,duration,score,reason}], total, source:"local-analysis" }.
   function planFilm(clips, style, film = 30) {
     style = STYLE_WEIGHTS[style] ? style : "cinematic";
@@ -133,12 +201,30 @@
     const avail = clips.reduce((a, c) => a + c.duration, 0), target = Math.min(film, avail - 0.2 * clips.length);
     const lens = shotLengths(style, target), chosen = [], count = clips.map(() => 0);
     let total = 0;
-    for (let k = 0; k < 60 && target - total >= 1; k++) {
+    // Key moments first: confident AI opener / closer and up to two highlights get a shot that contains them (deterministic).
+    const keys = [];
+    clips.forEach((c, ci) => (c.vision || []).forEach((f) => { if (f.confidence >= RELIABLE && f.importance >= 0.6 && ["opener", "closer", "highlight"].includes(f.role)) keys.push({ ci, ...f }); }));
+    const rank1 = (r) => keys.filter((k) => k.role === r).sort((a, b) => b.importance * b.confidence - a.importance * a.confidence || a.ci - b.ci || a.t - b.t);
+    const seeds = [rank1("opener")[0], rank1("closer")[0], ...rank1("highlight").slice(0, 2)].filter(Boolean);
+    for (const key of seeds) {
+      if (target - total < 1) break;
+      const L = Math.min(lens[Math.min(chosen.length, lens.length - 1)], target - total);
+      const cand = findRanges(clips[key.ci], style, L).filter((c) => c.start <= key.t && c.start + c.duration >= key.t &&
+        !chosen.some((x) => x.src === key.ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5) &&
+        !clips[key.ci].samples.some((s) => s.sem && s.sem.avoid && s.sem.w > 0.6 && s.t >= c.start && s.t <= c.start + c.duration))
+        .sort((a, b) => b.score - a.score || a.start - b.start)[0];
+      if (!cand) continue;
+      total += cand.duration; count[key.ci]++;
+      chosen.push({ src: key.ci, start: cand.start, duration: cand.duration, score: Math.round(cand.score * 100) / 100, rep: cand.rep, reason: cand.rep.sem && cand.rep.sem.caption && !cand.rep.sem.avoid ? cand.rep.sem.caption : why(cand.rep.traits) });
+    }
+    for (let k = chosen.length; k < 60 && target - total >= 1; k++) {
       const want = lens[Math.min(k, lens.length - 1)], L0 = Math.min(want, target - total), lens_k = L0 < 1 ? 1 : L0;
       let best = null;
       for (let ci = 0; ci < clips.length; ci++) for (const c of findRanges(clips[ci], style, lens_k)) {
         const hit = chosen.some((x) => x.src === ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5);
         if (hit) continue;
+        // a confidently AI-rejected moment (title card, unusable frame) is never used; the rest of that clip still is
+        if (clips[ci].samples.some((s) => s.sem && s.sem.avoid && s.sem.w > 0.6 && s.t >= c.start && s.t <= c.start + c.duration)) continue;
         let sc = c.score / (1 + 0.1 * count[ci]);
         for (const x of chosen) if (histDist(c.rep.hist, x.rep.hist) < 0.08) sc -= 0.06; // near-duplicate look
         if (c.duration < lens_k - 0.05) sc *= 0.8 + 0.2 * (c.duration / lens_k);       // scene shorter than the slot
@@ -147,15 +233,9 @@
       if (!best) break;
       total += best.duration; count[best.src]++; chosen.push({ src: best.src, start: best.start, duration: best.duration, score: Math.round(best.sc * 100) / 100, rep: best.rep, reason: best.rep.sem && best.rep.sem.caption && !best.rep.sem.avoid ? best.rep.sem.caption : why(best.rep.traits) });
     }
-    // Order by style: cinematic/vintage tell the story in upload order then time; dynamic opens on its strongest shot, then alternates clips.
-    let order;
-    if (style === "dynamic") {
-      const sorted = chosen.slice().sort((a, b) => b.score - a.score), opener = sorted[0], rest = chosen.filter((x) => x !== opener).sort((a, b) => a.src - b.src || a.start - b.start);
-      const byClip = clips.map((_, ci) => rest.filter((x) => x.src === ci)); order = opener ? [opener] : [];
-      while (byClip.some((q) => q.length)) for (const q of byClip) if (q.length) order.push(q.shift());
-    } else order = chosen.slice().sort((a, b) => a.src - b.src || a.start - b.start);
-    const plan = order.map((x) => ({ src: x.src, start: x.start, duration: x.duration, score: x.score, reason: x.reason }));
-    return { source: "local-analysis", style, plan, total: r1(plan.reduce((a, p) => a + p.duration, 0)) };
+    const { order, semantic } = orderShots(chosen, clips, style);
+    const plan = order.map((x) => ({ src: x.src, start: x.start, duration: x.duration, score: x.score, reason: x.reason, role: x.role || undefined }));
+    return { source: "local-analysis", style, plan, semantic, total: r1(plan.reduce((a, p) => a + p.duration, 0)) };
   }
 
   // ---------- browser sampler (needs DOM) ----------
@@ -182,5 +262,5 @@
     } finally { video.removeAttribute("src"); try { video.load(); } catch (_) {} URL.revokeObjectURL(url); }
   }
 
-  return { analyzeClip, planFilm, findRanges, scoreClip, sceneRanges, shotLengths, featurize, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
+  return { analyzeClip, planFilm, orderShots, clipStory, findRanges, scoreClip, sceneRanges, shotLengths, featurize, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
 });
