@@ -388,6 +388,7 @@ export default {
         const vision = validateVisionOutput(result.parsed, input.req);
         // An unusable reply is logged (the cost is real) but does NOT use up the user's free edit (quota counts only 'ok'/'fallback').
         await settleClaim(env.DB, claim, MODEL, vIn, vOut, vCost, vision ? "ok" : "bad_reply");
+        if (!vision) await env.DB.prepare("UPDATE usage_log SET error = ? WHERE id = ?").bind(result.stop || (result.parsed ? "invalid_schema" : "invalid_json"), claim).run();
         if (!vision) return reply({ ok: false, code: "vision_unusable", error: "The AI reply could not be used." }, 502);
         return reply({ ok: true, vision, passUsage: `${passLimit.count}/${PASS_LIMIT}` });
       }

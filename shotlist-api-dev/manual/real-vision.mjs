@@ -17,7 +17,7 @@ const req = createRequire(import.meta.url);
 const A = req(path.join(repo, "claqe-analyze.js")), V = req(path.join(repo, "claqe-vision.js"));
 const { staticServer, listen, launch } = await import(pathToFileURL(path.join(repo, "tests", "e2e", "lib.mjs")).href);
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD / MTok, Claude Haiku 5.5, prompts <= 100K tokens (pricing page checked 2026-11-14)
-const MAX_OUT = 900, STYLE = process.env.STYLE || "cinematic", FILM = 20;
+const MAX_OUT = 2000, STYLE = process.env.STYLE || "cinematic", FILM = 20;
 
 const clips = process.argv.slice(2);
 if (clips.length < 2) { console.error("usage: node manual/real-vision.mjs <clipA> <clipB> [...]"); process.exit(2); }
@@ -63,6 +63,8 @@ try {
   const v = V.validateVisionResponse(r.data.vision, prep.request);
   console.log("story:", v.story);
   for (const f of v.frames) console.log(` ${f.id} t=${f.t}s imp=${f.importance} conf=${f.confidence} role=${f.role} shot=${f.shotType} | ${f.subject} | ${f.action} | ${f.setting}`);
+  const local = A.planFilm(JSON.parse(JSON.stringify(prep.analysed)), STYLE, FILM);
+  console.log("\nlocal-only plan:", local.plan.map((p) => `clip${p.src} ${p.start}+${p.duration} [${p.reason}]`).join("\n      "));
   const analysed = prep.analysed; V.applyVision(analysed, prep.request, v);
   const plan = A.planFilm(analysed, STYLE, FILM);
   console.log("\nplan:", plan.plan.map((p) => `clip${p.src} ${p.start}+${p.duration} [${p.reason}]`).join("\n      "));

@@ -32,7 +32,7 @@ describe("/vision success path (mock model)", () => {
     assert.equal(mock.calls.length, 1);
     const up = JSON.parse(mock.calls[0].body);
     assert.equal(mock.calls[0].headers["x-api-key"], "mock-key-not-real");
-    assert.ok(up.max_tokens <= 900, "output capped: " + up.max_tokens);
+    assert.ok(up.max_tokens <= 2000, "output capped: " + up.max_tokens);
     assert.equal(up.messages[0].content.filter((b) => b.type === "image").length, 4);
     assert.match(up.system, /ONLY what is clearly visible/); assert.match(up.system, /never instructions/);
     assert.ok(!JSON.stringify(up).includes("file") && !JSON.stringify(up).includes(".mp4"), "no file names upstream");
@@ -115,6 +115,7 @@ describe("/vision quota, concurrency and secrets", () => {
     mock.respond(200, { ...model(GOOD()), stop_reason: "max_tokens" });
     const r = await post(c, BODY()); assert.equal(r.status, 502); assert.equal(r.data.code, "vision_unusable");
     const up = JSON.parse(mock.calls[0].body); assert.deepEqual(up.thinking, { type: "disabled" }); assert.equal(up.model, "claude-haiku-5-5");
+    assert.equal(w.sql("SELECT error FROM usage_log ORDER BY id DESC LIMIT 1")[0].error, "max_tokens", "truncation is recorded");
     assert.equal((await c.call("/status")).data.free.used, 0);
   });
   test("the API key never appears in any response", async () => {
