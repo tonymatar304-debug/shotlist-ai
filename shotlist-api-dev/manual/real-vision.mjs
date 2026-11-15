@@ -58,12 +58,16 @@ function metrics(p, vision, req, analysed) {
   const lens = p.plan.map((x) => x.duration), first = p.plan[0], last = p.plan[p.plan.length - 1];
   return { shots: p.plan.length, meanLen: +(p.total / p.plan.length).toFixed(2), lens: lens.join(","), total: p.total,
     perClip: req.clips.map((c) => +p.plan.filter((x) => x.src === c.index).reduce((t, x) => t + x.duration, 0).toFixed(1)).join("/"),
-    scenesUsed: scenes.size, highlightSecs: +secs(["highlight"]).toFixed(1), avoidSecs: +secs(["avoid"]).toFixed(1),
+    scenesUsed: scenes.size, highlightSecs: +secs(["highlight"]).toFixed(1), avoidSecs: vision ? +avoidedSecs(p, vision, req, analysed).toFixed(1) : 0,
     clipSequence: p.plan.map((x) => x.src).filter((v, i, a) => !i || a[i - 1] !== v).join(""),
     roleSequence: p.plan.map((x) => ({ opener: "O", highlight: "H", closer: "C", filler: "f" })[x.role] || "-").join(""),
     progressionsKept: analysed.map((c, ci) => (A.clipStory(c).progression ? p.plan.filter((x) => x.src === ci).every((x, i, a) => !i || x.start > a[i - 1].start) : null)).filter((x) => x !== null).every(Boolean),
     opensOnOpener: !!first && fr.some((f) => f.ci === first.src && f.role === "opener" && near(first, f, 1) > 0),
     endsOnCloser: !!last && fr.some((f) => f.ci === last.src && f.role === "closer" && near(last, f, 1) > 0) };
+}
+function avoidedSecs(p, vision, req, analysed) {
+  const an = JSON.parse(JSON.stringify(analysed)); V.applyVision(an, req, vision);
+  return p.plan.reduce((t, x) => t + an[x.src].samples.filter((q) => q.sem && q.sem.avoid && q.t >= x.start && q.t < x.start + x.duration).length, 0); // ~1 s per sample
 }
 const sharedSecs = (a, b) => a.plan.reduce((t, x) => t + b.plan.filter((y) => y.src === x.src).reduce((u, y) => u + Math.max(0, Math.min(x.start + x.duration, y.start + y.duration) - Math.max(x.start, y.start)), 0), 0);
 // order change at film level: share of clip pairs whose first appearance swaps between the two plans (0 = same order, 1 = reversed)

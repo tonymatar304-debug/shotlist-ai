@@ -252,7 +252,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     for(let i=0;i<plan.length;i++){
       const item=plan[i],fadeOut=Math.max(.1,item.duration-.22).toFixed(2);
       const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
-      segments.push("["+(item.src===undefined?i:item.src)+":v]trim=start="+item.start+":duration="+item.duration+",setpts=PTS-STARTPTS,fps=24,"+
+      segments.push("["+i+":v]trim=duration="+item.duration+",setpts=PTS-STARTPTS,fps=24,"+
         "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
         "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
         "eq="+grades[state.style]+",fade=t=in:st=0:d=0.2,fade=t=out:st="+fadeOut+
@@ -260,7 +260,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     }
     const inputs=plan.map((_,i)=>"[v"+i+"]").join("");
     segments.push(inputs+"concat=n="+plan.length+":v=1:a=0[film]");
-    segments.push("[film]["+state.clips.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
+    segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
   }
   // ---- Optional AI edit plan (claqe-api.js). Without a configured API the browser preview works unchanged. ----
@@ -438,7 +438,9 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       await ff.writeFile("claqe_mark.png",await makeWatermark());paths.push("claqe_mark.png");
       const [width,height]=state.format==="vertical"?[360,640]:[640,360];
       const command=[];
-      for(const file of files)command.push("-i",file);
+      // One input per shot, seeked to its start (-ss before -i): FFmpeg decodes only the footage it uses, and a clip can be
+      // reused out of time order (one shared input trimmed several times went black after the first backwards jump).
+      plan.forEach((item,i)=>command.push("-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",files[item.src===undefined?i:item.src]));
       command.push("-loop","1","-i","claqe_mark.png");
       command.push("-filter_complex",filterGraph(plan,width,height));
       command.push("-map","[out]","-an","-c:v","libx264","-preset","ultrafast","-crf","28",

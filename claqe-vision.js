@@ -59,20 +59,39 @@
 
   // Attach semantic judgement to analysed samples. Influence fades with distance (2.5 s), scales with the model's confidence,
   // and stops at a scene cut. Planner blends it with local scores (never replaces them).
+  // same cut rule as the planner (claqe-analyze isCut): a cut is a local maximum of visual change above 0.3
+  const isCut = (S, i) => i > 0 && S[i].scene > 0.3 && S[i].scene >= S[i - 1].scene && (i + 1 >= S.length || S[i].scene > S[i + 1].scene);
+  const look = (a, b) => { let h = 0; for (let k = 0; k < a.hist.length; k++) h += Math.abs(a.hist[k] - b.hist[k]); let d = 0; for (let k = 0; k < a.tiny.length; k++) d += Math.abs(a.tiny[k] - b.tiny[k]); return 0.5 * (h / 2) + 0.5 * (d / a.tiny.length / 255); };
+  // Region around an avoided frame that LOOKS like it (a held title card, a long blurry stretch): contiguous samples within
+  // distance 0.2 of the frame, at most +-6 s and never more than half the clip. A frame unlike its neighbours gets no region.
+  function lookAlike(clip, t) {
+    const S = clip.samples; if (!S.length) return null;
+    let fi = 0; S.forEach((s, k) => { if (Math.abs(s.t - t) < Math.abs(S[fi].t - t)) fi = k; });
+    let a = fi, b = fi;
+    while (a > 0 && look(S[a - 1], S[fi]) < 0.2 && t - S[a - 1].t <= 6) a--;
+    while (b < S.length - 1 && look(S[b + 1], S[fi]) < 0.2 && S[b + 1].t - t <= 6) b++;
+    let lo = S[a].t - 0.5, hi = S[b].t + 0.5; const max = clip.duration / 2;
+    if (hi - lo > max) { const c = (lo + hi) / 2; lo = Math.max(lo, c - max / 2); hi = Math.min(hi, c + max / 2); }
+    return { lo, hi };
+  }
   function applyVision(analysed, req, vision) {
     const byId = new Map(vision.frames.map((f) => [f.id, f]));
     analysed.forEach((clip, ci) => {
       clip.samples.forEach((s) => { delete s.sem; });
       clip.vision = req.clips[ci].frames.map((rf) => byId.get(rf.id)).filter(Boolean).map((f) => ({ t: f.t, role: f.role === "avoid" || !f.usable || f.shotType === "title" ? "avoid" : f.role, confidence: f.confidence, importance: f.importance }));
+      const regions = new Map(req.clips[ci].frames.map((rf) => [rf.id, lookAlike(clip, rf.t)]));
       for (const rf of req.clips[ci].frames) {
         const f = byId.get(rf.id); if (!f) continue;
         const avoid = f.role === "avoid" || !f.usable || f.shotType === "title";
         for (const s of clip.samples) {
-          const dt = Math.abs(s.t - rf.t); if (dt > 2.5) continue;
+          // a confident "avoid" also covers the look-alike region around it (e.g. a held title card); otherwise it fades over 2.5 s
+          const region = avoid && f.confidence >= 0.6 ? regions.get(rf.id) : null, dt = Math.abs(s.t - rf.t);
+          const wide = !!region && s.t >= region.lo && s.t <= region.hi; if (!wide && dt > 2.5) continue;
           const lo = Math.min(s.t, rf.t), hi = Math.max(s.t, rf.t);
-          if (clip.samples.some((x) => x.t > lo && x.t <= hi && x.scene > 0.3)) continue; // different scene
-          const w = (1 - dt / 2.5) * (0.4 + 0.6 * f.confidence);
-          if (!s.sem || w > s.sem.w) s.sem = { w, importance: 0.5 + (f.importance - 0.5) * w, avoid: avoid && f.confidence >= 0.4, must: f.role === "highlight" || f.role === "opener" || f.role === "closer", caption: caption(f), role: f.role, conf: f.confidence };
+          if (!wide && clip.samples.some((x, xi) => x.t > lo && x.t <= hi && isCut(clip.samples, xi))) continue; // different scene
+          const w = (wide ? 1 : 1 - dt / 2.5) * (0.4 + 0.6 * f.confidence);
+          const isAvoid = avoid && f.confidence >= 0.4;
+          if (!s.sem || (isAvoid && !s.sem.avoid) || (isAvoid === !!s.sem.avoid && w > s.sem.w)) s.sem = { w, importance: 0.5 + (f.importance - 0.5) * w, avoid: avoid && f.confidence >= 0.4, must: f.role === "highlight" || f.role === "opener" || f.role === "closer", caption: caption(f), role: f.role, conf: f.confidence };
         }
       }
     });

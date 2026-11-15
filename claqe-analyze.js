@@ -106,6 +106,8 @@
       const L = Math.min(len, room);
       for (let a = a0; a + L <= b0 + 1e-6; a += 0.5) {
         const ws = windowStats(clip, a, a + L);
+        // never a shot of (near) black: fades to black, end credits on black, lens cap
+        if (clip.samples.filter((s) => s.t >= a - 0.25 && s.t <= a + L + 0.25).every((s) => s.bright < 0.06)) continue;
         out.push({ start: r1(a), duration: r1(L), score: ws.score * 0.8 + ws.peak * 0.2 + (a === a0 && sc.start > 0 ? 0.04 : 0), rep: ws.rep });
       }
     }
@@ -137,11 +139,17 @@
     return { frames: fr, progression: mono && span, conflict: !mono };
   }
   // Role of a chosen shot: the strongest reliable observation inside it (ignored for clips whose observations contradict).
+  // Structural roles win inside a shot: an opener or closer outranks a highlight (if both, the stronger one)
+  // (otherwise a nearby highlight would silently erase the film's opening or ending).
   function shotRole(x, clip, story) {
     if (story.conflict) return null;
-    let best = null;
-    for (const s of clip.samples) if (s.sem && s.t >= x.start - 0.25 && s.t <= x.start + x.duration + 0.25 && !s.sem.avoid && s.sem.conf >= RELIABLE && s.sem.w >= 0.35 && (!best || s.sem.w * s.sem.importance > best.w * best.importance)) best = s.sem;
-    return best ? { role: best.role, strength: best.w * best.importance * best.conf } : null;
+    const sems = clip.samples.filter((s) => s.sem && s.t >= x.start - 0.25 && s.t <= x.start + x.duration + 0.25 && !s.sem.avoid && s.sem.conf >= RELIABLE && s.sem.w >= 0.35);
+    if (!sems.length) return null;
+    const str = (s) => s.sem.w * s.sem.importance * s.sem.conf;
+    const pick = (role) => sems.filter((s) => s.sem.role === role).sort((p, q) => str(q) - str(p))[0];
+    const o = pick("opener"), c = pick("closer");
+    const best = o && c ? (str(o) >= str(c) ? o : c) : o || c || sems.slice().sort((p, q) => str(q) - str(p))[0];
+    return { role: best.sem.role, strength: str(best) };
   }
   // Order shots. Without reliable observations this is exactly the local style order.
   // With them: cinematic builds an arc (opening clip first, highlights rising, closing clip last); vintage keeps the memory-like

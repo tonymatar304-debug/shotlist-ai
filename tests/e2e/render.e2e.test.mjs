@@ -123,6 +123,19 @@ describe("real MP4 export", () => {
     assert.equal(await page.evaluate(() => window.__claqeLazyCount), 4, "both clips mounted lazily in both renders");
   });
 
+  test("a clip reused OUT of time order renders every shot (no black after a backwards jump)", async () => {
+    await page.addInitScript(() => { window.__fixedPlan = [{ src: 0, start: 1.8, duration: 1 }, { src: 1, start: 0.5, duration: 1 }, { src: 0, start: 0.2, duration: 1 }]; });
+    await page.goto(openUrl(port, false));
+    await page.evaluate(() => { const o = window.ClaqeAnalyze.planFilm; window.ClaqeAnalyze.planFilm = (c, s, f) => ({ ...o(c, s, f), plan: window.__fixedPlan }); });
+    await addClips([RG, BLUE]);
+    await page.click("#create");
+    await waitStatus(/Film ready|Export failed/);
+    assert.match(await text("#status"), /Film ready/, await text("#status"));
+    const m = await inspect([0.5, 1.5, 2.5]);
+    assert.ok(Math.abs(m.duration - 3) < 0.25, "duration " + m.duration);
+    assert.deepEqual(m.px.map(dom), ["green", "blue", "red"]); // later part of clip 0, clip 1, then EARLIER part of clip 0
+  });
+
   test("4 clips: renders, correct order and total length; records time and JS heap", async () => {
     await page.goto(openUrl(port, false));
     await addClips([RG, BLUE, YEL, MAG]);

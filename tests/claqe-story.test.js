@@ -96,3 +96,19 @@ test("short clip holding both opener and closer gives two shots: the film opens 
     assert.ok(chronological(p, 2));
   }
 });
+
+test("an opener sharing a shot with a highlight still opens the film (structural role wins)", () => {
+  const cs = withObs(clips(), { "1@5.5": { role: "opener", importance: 0.6, confidence: 0.6 }, "1@8.5": { role: "highlight", importance: 0.7, confidence: 0.6 }, "2@10.5": { role: "highlight", importance: 0.9 } });
+  const p = plan(cs, "cinematic"); valid(p, cs);
+  assert.equal(p.plan[0].src, 1, "opens on the clip holding the opener"); assert.ok(p.plan[0].start <= 5.5 && p.plan[0].start + p.plan[0].duration >= 5.5);
+});
+
+test("a confident title card is avoided across the look-alike stretch around it (not just +-1 s); the rest of the clip is still used", () => {
+  const c0 = clip(30, 0.3); c0.samples.forEach((s) => { if (s.t > 20 && s.t < 26) { s.hist = new Array(16).fill(0); s.hist[12] = 1; s.tiny = new Array(576).fill(220); } }); A.linkScenes(c0.samples);
+  const cs = withObs([c0, clip(20, 0.5), clip(20, 0.7)], { "0@21.5": { role: "closer", shotType: "title", importance: 0.2, confidence: 0.8 } });
+  for (const style of ["cinematic", "dynamic", "vintage"]) {
+    const p = plan(cs, style); valid(p, cs, 20);
+    assert.ok(!p.plan.some((x) => x.src === 0 && x.start < 25.8 && x.start + x.duration > 20.2), style + " uses the title scene: " + JSON.stringify(p.plan.filter((x) => x.src === 0)));
+    assert.ok(p.plan.some((x) => x.src === 0), style + " still uses clip 0");
+  }
+});
