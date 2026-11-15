@@ -104,7 +104,8 @@ async function addClips() {
 }
 const text = (sel) => page.textContent(sel);
 const waitStatus = (re, timeout = 45000) => page.waitForFunction((s) => new RegExp(s).test(document.getElementById("status").textContent), re.source, { timeout });
-const graph = async () => page.evaluate(() => { const c = window.__ffmpegCalls && window.__ffmpegCalls[0]; return c ? c[c.indexOf("-filter_complex") + 1] : null; });
+// All filter graphs of the render, in order (sequential renderer: one per shot, then the join).
+const graph = async () => page.evaluate(() => { const g = (window.__ffmpegCalls || []).filter((c) => c.includes("-filter_complex")).map((c) => c[c.indexOf("-filter_complex") + 1]); return g.length ? g.join(";") : null; });
 const ffmpegRuns = () => page.evaluate(() => (window.__ffmpegCalls || []).length);
 const resultVisible = () => page.evaluate(() => getComputedStyle(document.getElementById("result")).display !== "none");
 
@@ -170,9 +171,9 @@ describe("AI edit plan", () => {
     const gen = api.calls.find((c) => c.path === "/generate").body;
     assert.deepEqual(gen.clips, [{ duration: 5.2 }, { duration: 8 }]); // only durations leave the browser
     assert.equal(gen.style, "dynamic");
-    assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=144,.*\[1:v\]fps=24:start_time=0,trim=end_frame=108,/); // AI durations (6 s, 4.5 s) drive FFmpeg
-    const args = await page.evaluate(() => window.__ffmpegCalls[0].join(" "));
-    assert.match(args, /-ss 0\.5 -t 6\.25 -i input_1\.mp4 -ss 0\.2 -t 4\.75 -i input_0\.mp4/); // AI order + trims = seeked inputs
+    assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=144,.*\[\d+:v\]fps=24:start_time=0,trim=end_frame=108,/); // AI durations (6 s, 4.5 s) drive FFmpeg
+    const args = await page.evaluate(() => window.__ffmpegCalls.map((c) => c.join(" ")).join(" | "));
+    assert.match(args, /-ss 0\.5 -t 6\.25 -i input_1\.mp4 .*-ss 0\.2 -t 4\.75 -i input_0\.mp4/); // AI order + trims = seeked inputs
     assert.match(await text("#resultNote"), /AI-assisted edit plan/);
     assert.match(await text("#status"), /follow the AI edit plan/);
     await page.waitForFunction(() => /1 of 3 free AI edits used/.test(document.getElementById("aiNote").textContent));

@@ -292,33 +292,41 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     const stats=plan.map((p,i)=>{const c=state.clips[p.src===undefined?i:p.src],a=c&&c.analysis;return a&&window.CLAQE_MATCH!==false?ClaqeLook.shotStats(a.samples,p.start,p.duration):null});
     return ClaqeLook.matchLooks(stats,state.style).map(ClaqeLook.lookFilter);
   }
+  const filmHasAudio=(plan,mix)=>!!(mix&&mix.audio)&&plan.some((p,i)=>mix.audio[p.src===undefined?i:p.src]);
+  // Filters for shot i read from input `inp`: picture -> [v<i>], sound (when the film has clip audio) -> [a<i>].
+  function shotSegments(plan,i,inp,width,height,mix,looks){
+    const segments=[],item=plan[i],n=shotFrames(item),dur=n/24,last=plan.length-1;
+    // Hard cuts between shots; the film fades in from black and out to black only at its very start and end.
+    const fadeIn=i===0?Math.min(.4,dur/3):0,fadeOut=i===last?Math.min(.8,dur/3):0;
+    const fades=(fadeIn?",fade=t=in:st=0:d="+fadeIn.toFixed(3):"")+(fadeOut?",fade=t=out:st="+(dur-fadeOut).toFixed(3)+":d="+fadeOut.toFixed(3):"");
+    const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
+    // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
+    segments.push("["+inp+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
+      "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
+      "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
+      looks[i]+fades+",format=yuv420p[v"+i+"]");
+    if(!filmHasAudio(plan,mix))return segments;
+    // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
+    // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
+    const samples=n*2000,src=item.src===undefined?i:item.src,gain=mix.gains&&mix.gains[src]||0;
+    segments.push(mix.audio[src]
+      ?"["+inp+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,"+(gain?"volume="+gain+"dB,":"")+"apad,atrim=end_sample="+samples+
+        ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-Math.max(.02,fadeOut)).toFixed(3)+":d="+Math.max(.02,fadeOut).toFixed(3)+"[a"+i+"]"
+      :"anullsrc=r=48000:cl=stereo,atrim=end_sample="+samples+"[a"+i+"]");
+    return segments;
+  }
+  // Single pass: every shot is its own seeked input, joined by the concat filter.
   function filterGraph(plan,width,height,mix,looks){
-    const audio=mix&&mix.audio,music=mix&&mix.music;
     looks=looks||shotLooks(plan);
-    const segments=[],withAudio=!!audio&&plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
-    const last=plan.length-1;
-    for(let i=0;i<plan.length;i++){
-      const item=plan[i],n=shotFrames(item),dur=n/24;
-      // Hard cuts between shots; the film fades in from black and out to black only at its very start and end.
-      const fadeIn=i===0?Math.min(.4,dur/3):0,fadeOut=i===last?Math.min(.8,dur/3):0;
-      const fades=(fadeIn?",fade=t=in:st=0:d="+fadeIn.toFixed(3):"")+(fadeOut?",fade=t=out:st="+(dur-fadeOut).toFixed(3)+":d="+fadeOut.toFixed(3):"");
-      const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
-      // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
-      segments.push("["+i+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
-        "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
-        "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
-        looks[i]+fades+",format=yuv420p[v"+i+"]");
-      if(!withAudio)continue;
-      // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
-      // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
-      const samples=n*2000,src=item.src===undefined?i:item.src,gain=mix.gains&&mix.gains[src]||0;
-      segments.push(audio[src]
-        ?"["+i+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,"+(gain?"volume="+gain+"dB,":"")+"apad,atrim=end_sample="+samples+
-          ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-Math.max(.02,fadeOut)).toFixed(3)+":d="+Math.max(.02,fadeOut).toFixed(3)+"[a"+i+"]"
-        :"anullsrc=r=48000:cl=stereo,atrim=end_sample="+samples+"[a"+i+"]");
-    }
+    const segments=[],withAudio=filmHasAudio(plan,mix);
+    for(let i=0;i<plan.length;i++)segments.push(...shotSegments(plan,i,i,width,height,mix,looks));
     const inputs=plan.map((_,i)=>"[v"+i+"]"+(withAudio?"[a"+i+"]":"")).join("");
-    segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film]"+(music?"[orig]":"[aud]"):"0[film]"));
+    segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film]"+(mix.music?"[orig]":"[aud]"):"0[film]"));
+    return finishGraph(segments,plan,mix,plan.length);
+  }
+  // Music, ducking, limiter and watermark on top of [film] (+ [orig] clip sound, or [aud] when there is no music).
+  function finishGraph(segments,plan,mix,markInput){
+    const music=mix&&mix.music,withAudio=filmHasAudio(plan,mix);
     if(music){
       // Music: from its first sound, levelled, smooth fade in/out, silence after it ends (never longer than the film).
       const total=plan.reduce((s,p)=>s+shotFrames(p),0)/24,end=Math.min(total,music.end),fd=Math.min(2,end/3);
@@ -328,8 +336,25 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       if(withAudio)segments.push("[orig]asplit=2[o1][o2];[mus][o2]sidechaincompress=threshold=0.02:ratio=6:attack=20:release=400[duck];"+
         "[o1][duck]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.94:level=0:latency=1[aud]");
     }
-    segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
+    segments.push("[film]["+markInput+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
+  }
+  // Sequential pass 1, shot i: its own seeked input -> a small 24 fps intermediate at output size (graded, zoomed, faded,
+  // levelled sound). Only this shot's decoder is alive; FFmpeg frees it when the run ends.
+  const INTERMEDIATE={lossless:["-c:v","libx264","-preset","ultrafast","-qp","0"],visual:["-c:v","libx264","-preset","veryfast","-crf","12"]};
+  function shotCommand(plan,i,file,width,height,mix,looks,out){
+    const item=plan[i],withAudio=filmHasAudio(plan,mix);
+    return ["-y","-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",file,
+      "-filter_complex",shotSegments(plan,i,0,width,height,mix,looks).join(";"),"-map","[v"+i+"]",
+      ...(withAudio?["-map","[a"+i+"]","-c:a","pcm_s16le"]:["-an"]),
+      ...(INTERMEDIATE[window.CLAQE_INTERMEDIATE]||INTERMEDIATE.lossless),"-pix_fmt","yuv420p","-r","24",out];
+  }
+  // Sequential pass 2: the intermediates through the concat demuxer (one small decoder at a time) + music + watermark.
+  function joinGraph(plan,mix){
+    const music=mix&&mix.music,withAudio=filmHasAudio(plan,mix);
+    const segments=["[0:v]setpts=PTS-STARTPTS[film]"];
+    if(withAudio)segments.push("[0:a]asetpts=PTS-STARTPTS"+(music?"[orig]":"[aud]"));
+    return finishGraph(segments,plan,mix,1);
   }
   // ---- Optional AI edit plan (claqe-api.js). Without a configured API the browser preview works unchanged. ----
   const isLocal=["localhost","127.0.0.1"].includes(location.hostname);
@@ -544,9 +569,37 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         return command;
       };
       let mix=withAudio||music?{audio,gains,music}:null;
-      window.__claqeLast={plan,mix,looks:shotLooks(plan),loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
+      const looks=shotLooks(plan);
+      // Sequential renderer: one shot per FFmpeg run, then a join. Memory stays at about one decoder instead of one per shot.
+      const sequential=async mix=>{
+        const shots=[];let kb=0;
+        try{
+          for(let i=0;i<plan.length;i++){
+            setStatus("Making your film… shot "+(i+1)+" of "+plan.length+". Browser encoding may take several minutes. Keep this tab open.");
+            const out="claqe_shot_"+i+".mkv";shots.push(out);
+            state.logTap=[];
+            const c=await ff.exec(shotCommand(plan,i,files[plan[i].src===undefined?i:plan[i].src],width,height,mix,looks,out));
+            const sz=state.logTap.map(l=>/video:\s*(\d+)\S*\s+audio:\s*(\d+)/.exec(l)).filter(Boolean).pop();state.logTap=null;
+            if(sz)kb+=+sz[1]+ +sz[2];window.__claqeLast.intermediateKB=kb; // FFmpeg's own size report (measurement only)
+            if(c!==0)return c;
+          }
+          setStatus("Making your film… joining "+plan.length+" shots. Keep this tab open.");
+          await ff.writeFile("claqe_shots.txt",shots.map(s=>"file '"+s+"'").join("\n"));shots.push("claqe_shots.txt");
+          const jm=mix&&mix.music?{...mix,music:{...mix.music,input:2}}:mix;
+          const command=["-y","-f","concat","-safe","0","-i","claqe_shots.txt","-loop","1","-i","claqe_mark.png"];
+          if(jm&&jm.music)command.push("-ss",String(jm.music.start),"-t",String(Math.round((+total+1)*100)/100),"-i",jm.music.file);
+          command.push("-filter_complex",joinGraph(plan,jm),"-map","[out]",...(jm?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),
+            "-c:v","libx264","-preset","ultrafast","-crf","28","-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",total,"claqe_film.mp4");
+          return await ff.exec(command);
+        }finally{for(const s of shots){try{await ff.deleteFile(s)}catch(_){}}} // intermediates never outlive the job
+      };
+      const renderer=window.CLAQE_RENDER==="single"?"single":"sequential"; // window.CLAQE_RENDER="single": previous one-pass renderer
+      window.__claqeLast={plan,mix,looks,renderer,loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
       setStatus("Making your film… Browser encoding may take several minutes. Keep this tab open.");
-      let code=await ff.exec(buildCommand(mix));
+      let code=1;
+      if(renderer==="sequential"){try{code=await sequential(mix)}catch(e){console.warn("CLAQE sequential:",e&&e.message);code=1}}
+      if(renderer==="sequential"&&code!==0){console.warn("CLAQE: sequential render failed ("+(state.lastError?state.lastError():"")+"), using the single-pass renderer.");window.__claqeLast.renderer="single (fallback)"}
+      if(code!==0)code=await ff.exec(buildCommand(mix));
       if(code!==0&&mix){ // never lose the film because of sound: render once more without audio
         console.warn("CLAQE: render with audio failed ("+(state.lastError?state.lastError():"")+"), retrying video-only.");
         notes.length=0;notes.push("The sound couldn't be rendered, so this film is silent.");mix=null;
@@ -565,12 +618,18 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       setStatus(source==="ai-vision"?"Film ready! An AI model described sampled frames and CLAQE combined that with local motion and quality analysis; grading and motion are style presets.":source==="local-analysis"?"Film ready! Moments were chosen by local footage analysis (motion, sharpness, exposure, scene cuts), not by AI; grading and motion are style presets.":source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
       paths.push("claqe_film.mp4");
       $("result").scrollIntoView({behavior:"smooth",block:"start"});
+      // The sequential path keeps FFmpeg's heap at about one shot; it is reused by the next job. After the single-pass path
+      // (default or fallback) the heap can stay at its peak, so start the next job with a fresh engine.
+      if(window.__claqeLast.renderer!=="sequential")state.resetEngine=true;
     }catch(err){
+      state.resetEngine=true; // a failed run (e.g. out of memory) can leave the WASM module unusable
       console.error(err);
       setStatus("Export failed: "+(err&&err.message?err.message:String(err))+"\nThe browser renderer is experimental. Try shorter MP4 clips on desktop Chrome/Edge.",true);
     }finally{
       if(ff){for(const m of mounts){try{await ff.unmount(m)}catch(_){}try{await ff.deleteDir(m)}catch(_){}}}
       if(ff){for(const path of paths){try{await ff.deleteFile(path)}catch(_){}}}
+      if(ff&&state.resetEngine){try{ff.terminate()}catch(_){}if(state.ff===ff)state.ff=null}
+      state.resetEngine=false;
       state.busy=false;refresh();
     }
   }

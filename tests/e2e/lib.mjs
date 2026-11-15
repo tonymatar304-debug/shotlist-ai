@@ -39,6 +39,10 @@ export const rootPid = () => Number(execFileSync("powershell.exe", ["-NoProfile"
 
 // Serve the REAL FFmpeg.wasm 0.12.15 / core 0.12.10 (the versions index.html pins) from tests/node_modules.
 export async function routeRealFfmpeg(ctx) {
+  // Run every real-render test against a chosen renderer: CLAQE_RENDER=single|sequential (app default: sequential).
+  if (process.env.CLAQE_RENDER) await ctx.addInitScript((r) => { window.CLAQE_RENDER = r; }, process.env.CLAQE_RENDER);
+  ctx.on("console", (m) => { if (/sequential render failed|CLAQE sequential:/.test(m.text())) console.log("# RENDERER FALLBACK: " + m.text().slice(0, 300)); });
+  if (process.env.CLAQE_INTERMEDIATE) await ctx.addInitScript((r) => { window.CLAQE_INTERMEDIATE = r; }, process.env.CLAQE_INTERMEDIATE);
   await ctx.route(/cdn\.jsdelivr\.net\/npm\/@ffmpeg\/(ffmpeg|core)@[\d.]+\/dist\/(umd|esm)\//, (route) => {
     const m = /@ffmpeg\/(ffmpeg|core)@[\d.]+\/dist\/(umd|esm)\/([\w.\-]+)/.exec(route.request().url());
     const file = path.join(NM, m[1], "dist", m[2], m[3]);
