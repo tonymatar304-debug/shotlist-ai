@@ -165,3 +165,6 @@ dist
 .env*
 !.env.example
 .wrangler/
+
+# saved paid-test runs (contain analysis data, not secrets)
+manual/runs/
