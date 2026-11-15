@@ -35,7 +35,7 @@ for (const style of styles) {
     const base = "https://cdn.jsdelivr.net/npm/", blob = async (u, t) => URL.createObjectURL(new Blob([await (await fetch(u)).arrayBuffer()], { type: t }));
     const ff = new window.FFmpegWASM.FFmpeg();
     await ff.load({ coreURL: await blob(base + "@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.js", "text/javascript"), wasmURL: await blob(base + "@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm", "application/wasm") });
-    await ff.writeFile("f.mp4", film);
+    await ff.writeFile("f.mp4", film.slice()); // a copy: writeFile transfers (detaches) the buffer to the worker
     const at = []; let s = 0; for (const n of frames) { at.push({ first: s, mid: s + (n >> 1), last: s + n - 1 }); s += n; }
     const want = [...new Set(at.flatMap((a) => [a.first, a.mid, a.last]))].sort((a, b) => a - b), W = 64, H = 36;
     const sel = (list) => "select='" + list.map((n) => "eq(n," + n + ")").join("+") + "'";
