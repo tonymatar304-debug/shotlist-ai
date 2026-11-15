@@ -242,24 +242,50 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       return {duration,start:Math.round(start*10)/10};
     });
   }
-  function filterGraph(plan,width,height){
+  // Shot lengths snapped to whole frames at 24 fps, so each shot's video and audio are exactly the same length.
+  const shotFrames=item=>Math.max(1,Math.round(item.duration*24));
+  // Which clips carry an audio stream (ffprobe, cached per clip). Unknown/failed probe = silent: never blocks the render.
+  async function probeAudio(ff,files){
+    for(let i=0;i<state.clips.length;i++){
+      const c=state.clips[i];
+      if(c.hasAudio!==undefined)continue;
+      c.hasAudio=false;
+      if(typeof ff.ffprobe!=="function")continue;
+      try{
+        await ff.ffprobe(["-v","error","-select_streams","a","-show_entries","stream=index","-of","csv=p=0",files[i],"-o","claqe_probe.txt"]);
+        c.hasAudio=/\d/.test(new TextDecoder().decode(await ff.readFile("claqe_probe.txt")));
+      }catch(e){console.warn("CLAQE audio probe failed, treating clip as silent:",e&&e.message)}
+      try{await ff.deleteFile("claqe_probe.txt")}catch(e){}
+    }
+    return state.clips.map(c=>window.CLAQE_AUDIO!==false&&c.hasAudio===true);
+  }
+  function filterGraph(plan,width,height,audio){
     const grades={
       cinematic:"contrast=1.08:saturation=0.9:gamma=0.97",
       dynamic:"contrast=1.13:saturation=1.12:gamma=1.0",
       vintage:"contrast=0.98:saturation=0.78:gamma=1.04"
     };
-    const segments=[];
+    const segments=[],withAudio=!!audio&&audio.some(Boolean);
     for(let i=0;i<plan.length;i++){
-      const item=plan[i],fadeOut=Math.max(.1,item.duration-.22).toFixed(2);
+      const item=plan[i],n=shotFrames(item),dur=n/24,fadeOut=Math.max(.1,dur-.22).toFixed(2);
       const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
-      segments.push("["+i+":v]trim=duration="+item.duration+",setpts=PTS-STARTPTS,fps=24,"+
+      // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
+      segments.push("["+i+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
         "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
         "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
         "eq="+grades[state.style]+",fade=t=in:st=0:d=0.2,fade=t=out:st="+fadeOut+
         ":d=0.2,format=yuv420p[v"+i+"]");
+      if(!withAudio)continue;
+      // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
+      // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
+      const samples=n*2000,src=item.src===undefined?i:item.src;
+      segments.push(audio[src]
+        ?"["+i+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=end_sample="+samples+
+          ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-.02).toFixed(3)+":d=0.02[a"+i+"]"
+        :"anullsrc=r=48000:cl=stereo,atrim=end_sample="+samples+"[a"+i+"]");
     }
-    const inputs=plan.map((_,i)=>"[v"+i+"]").join("");
-    segments.push(inputs+"concat=n="+plan.length+":v=1:a=0[film]");
+    const inputs=plan.map((_,i)=>"[v"+i+"]"+(withAudio?"[a"+i+"]":"")).join("");
+    segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film][aud]":"0[film]"));
     segments.push("[film]["+plan.length+":v]overlay=x=W-w-10:y=H-h-9:shortest=1,format=yuv420p[out]");
     return segments.join(";");
   }
@@ -442,10 +468,11 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       // reused out of time order (one shared input trimmed several times went black after the first backwards jump).
       plan.forEach((item,i)=>command.push("-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",files[item.src===undefined?i:item.src]));
       command.push("-loop","1","-i","claqe_mark.png");
-      command.push("-filter_complex",filterGraph(plan,width,height));
-      command.push("-map","[out]","-an","-c:v","libx264","-preset","ultrafast","-crf","28",
+      const audio=await probeAudio(ff,files),withAudio=plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
+      command.push("-filter_complex",filterGraph(plan,width,height,withAudio?audio:null));
+      command.push("-map","[out]",...(withAudio?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),"-c:v","libx264","-preset","ultrafast","-crf","28",
         "-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",
-        String(plan.reduce((sum,p)=>sum+p.duration,0)),"claqe_film.mp4");
+        String(plan.reduce((sum,p)=>sum+shotFrames(p),0)/24),"claqe_film.mp4");
       setStatus("Making your film… Browser encoding may take several minutes. Keep this tab open.");
       const code=await ff.exec(command);
       if(code!==0)throw new Error("The renderer stopped (code "+code+"). "+(state.lastError?state.lastError():""));
@@ -457,6 +484,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       $("download").href=state.outputURL;
       $("result").style.display="block";
       $("resultNote").textContent=source==="local-analysis"||source==="ai-vision"?ClaqeAPI.describeSource(source)+" · "+shotNotes(plan)+(aiPlan&&aiPlan.note?" · "+aiPlan.note:"")+" · watermark embedded.":aiEnabled?ClaqeAPI.describeSource(source)+" · the CLAQE watermark is embedded in the video.":"Preview export · the CLAQE watermark is embedded in the video.";
+      $("resultNote").textContent+=withAudio?" Original clip audio kept"+(audio.every(Boolean)?".":" (silent clips stay silent)."):"";
       setStatus(source==="ai-vision"?"Film ready! An AI model described sampled frames and CLAQE combined that with local motion and quality analysis; grading and motion are style presets.":source==="local-analysis"?"Film ready! Moments were chosen by local footage analysis (motion, sharpness, exposure, scene cuts), not by AI; grading and motion are style presets.":source==="ai"?"Film ready! Your cuts follow the AI edit plan; grading and motion are style presets.":source==="server-fallback"?"Film ready, using a standard edit plan. The AI reply wasn't usable, so this film is not AI-edited.":"Film ready! The MP4 contains real editing effects and an embedded watermark.");
       paths.push("claqe_film.mp4");
       $("result").scrollIntoView({behavior:"smooth",block:"start"});

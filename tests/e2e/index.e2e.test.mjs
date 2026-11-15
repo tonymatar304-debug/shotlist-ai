@@ -120,7 +120,7 @@ describe("browser preview (no API configured)", () => {
     assert.match(await page.getAttribute("#download", "href"), /^blob:/);
     assert.match(await text("#resultNote"), /^Preview export/);
     assert.ok(!/AI/.test(await text("#resultNote")));
-    assert.match(await graph(), /^\[0:v\]trim=duration=/);
+    assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=\d+,/);
     assert.match(await graph(), /saturation=0\.78/); // vintage grade applied
     assert.equal(api.calls.length, 0);
   });
@@ -170,7 +170,7 @@ describe("AI edit plan", () => {
     const gen = api.calls.find((c) => c.path === "/generate").body;
     assert.deepEqual(gen.clips, [{ duration: 5.2 }, { duration: 8 }]); // only durations leave the browser
     assert.equal(gen.style, "dynamic");
-    assert.match(await graph(), /^\[0:v\]trim=duration=6.*\[1:v\]trim=duration=4\.5/); // AI durations drive FFmpeg
+    assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=144,.*\[1:v\]fps=24:start_time=0,trim=end_frame=108,/); // AI durations (6 s, 4.5 s) drive FFmpeg
     const args = await page.evaluate(() => window.__ffmpegCalls[0].join(" "));
     assert.match(args, /-ss 0\.5 -t 6\.25 -i input_1\.mp4 -ss 0\.2 -t 4\.75 -i input_0\.mp4/); // AI order + trims = seeked inputs
     assert.match(await text("#resultNote"), /AI-assisted edit plan/);
@@ -243,7 +243,7 @@ describe("AI edit plan", () => {
       await page.click('button[data-plan="preview"]'); await page.click("#create");
       await waitStatus(/Film ready/);
       assert.match(await text("#resultNote"), /Browser preview · no AI/);
-      assert.match(await graph(), /^\[0:v\]trim=duration=/);
+      assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=\d+,/);
     });
   }
   test("AI plan fetched but render fails: no 'AI' success shown", async () => {

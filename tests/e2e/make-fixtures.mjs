@@ -20,6 +20,11 @@ const busy = (d) => ["-f", "lavfi", "-i", `testsrc2=s=320x180:d=${d}:r=24`];
 jobs["still-then-busy-20s.mp4"] = [...bars(10), ...busy(10), "-filter_complex", "[1]noise=alls=20:allf=t[b];[0][b]concat=n=2:v=1:a=0[o]", "-map", "[o]", ...enc];
 jobs["busy-then-still-20s.mp4"] = [...busy(10), ...bars(10), "-filter_complex", "[0]noise=alls=20:allf=t[b];[b][1]concat=n=2:v=1:a=0[o]", "-map", "[o]", ...enc];
 jobs["gray-20s.mp4"] = [...solid("0x606060", "320x180", 20), ...enc];
+// A/V sync clip: dark frames with a 2-frame white flash and a 60 ms 1 kHz beep at the SAME instants (0.5, 2.0, 3.5, 5.0 s).
+// Mono AAC 44.1 kHz (the renderer resamples to 48 kHz stereo).
+jobs["beep-flash-6s.mp4"] = ["-f", "lavfi", "-i", "color=c=0x202020:s=320x180:d=6:r=24,drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='lt(mod(t+1,1.5),0.08)'",
+  "-f", "lavfi", "-i", "aevalsrc='if(lt(mod(t+1,1.5),0.06),0.8*sin(2*PI*1000*t),0)':s=44100:d=6",
+  ...enc, "-c:a", "aac", "-b:a", "96k", "-shortest"];
 const web = staticServer(); const port = await listen(web);
 const browser = await launch(); const ctx = await browser.newContext(); await routeRealFfmpeg(ctx);
 const page = await ctx.newPage();
