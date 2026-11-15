@@ -16,8 +16,8 @@ function withObs(cs, obs) {
 }
 const plan = (cs, style) => A.planFilm(cs, style, 30);
 const clipSeq = (p) => p.plan.map((x) => x.src).filter((s, i, a) => i === 0 || a[i - 1] !== s).join("");
-function valid(p, cs) {
-  assert.ok(p.total <= 30.5 && p.total >= 25, "total " + p.total);
+function valid(p, cs, min = 25) {
+  assert.ok(p.total <= 30.5 && p.total >= min, "total " + p.total);
   for (const x of p.plan) { assert.ok(x.duration >= 1 && x.start >= 0 && x.start + x.duration <= cs[x.src].duration + 1e-9); for (const r of A.sceneRanges(cs[x.src])) assert.ok(!(x.start < r.end - 0.2 && x.start + x.duration > r.end + 0.2 && r.end < cs[x.src].duration), "crosses cut"); }
   for (const x of p.plan) for (const y of p.plan) if (x !== y && x.src === y.src) assert.ok(x.start >= y.start + y.duration - 1e-9 || y.start >= x.start + x.duration - 1e-9, "overlap");
 }
@@ -82,4 +82,17 @@ test("one bad frame does not discard its clip: only that moment is avoided", () 
 test("deterministic for the same footage and observations", () => {
   const obs = { "2@5.5": { role: "opener" }, "1@8.5": { role: "highlight" }, "0@10.5": { role: "closer" } };
   for (const style of ["cinematic", "dynamic", "vintage"]) assert.deepEqual(plan(withObs(clips(), obs), style), plan(withObs(clips(), obs), style));
+});
+
+test("short clip holding both opener and closer gives two shots: the film opens on the bud and ends on the bloom", () => {
+  const short = () => { const c = clip(5.1, 0.6); return c; };
+  for (const style of ["cinematic", "dynamic"]) {
+    const cs = withObs([clip(20, 0.3), clip(10, 0.5), short()], { "2@2.5": { role: "opener", importance: 0.7 }, "2@4.5": { role: "closer", importance: 0.8 }, "1@4.5": { role: "highlight", importance: 0.85 } });
+    const p = plan(cs, style); valid(p, cs, 20); // 35 s of footage: dynamic reaches ~21 s even without AI (0.5 s gaps)
+    const flower = p.plan.filter((x) => x.src === 2);
+    assert.ok(flower.length >= 2, style + ": bud and bloom are separate shots " + JSON.stringify(flower));
+    assert.equal(p.plan[0].src, 2, style + " opens on the bud"); assert.ok(p.plan[0].start <= 2.5 && p.plan[0].start + p.plan[0].duration >= 2.5);
+    const last = p.plan[p.plan.length - 1]; assert.equal(last.src, 2, style + " ends on the bloom"); assert.ok(last.start <= 4.5 && last.start + last.duration >= 4.5);
+    assert.ok(chronological(p, 2));
+  }
 });

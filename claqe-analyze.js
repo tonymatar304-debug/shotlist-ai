@@ -208,18 +208,27 @@
     const seeds = [rank1("opener")[0], rank1("closer")[0], ...rank1("highlight").slice(0, 2)].filter(Boolean);
     for (const key of seeds) {
       if (target - total < 1) break;
-      const L = Math.min(lens[Math.min(chosen.length, lens.length - 1)], target - total);
-      const cand = findRanges(clips[key.ci], style, L).filter((c) => c.start <= key.t && c.start + c.duration >= key.t &&
+      const L0 = Math.min(lens[Math.min(chosen.length, lens.length - 1)], target - total);
+      // an opener whose own clip also has a later closer (e.g. a 5 s bud -> bloom clip) must leave room for that closer
+      const later = key.role === "opener" ? seeds.find((k) => k.role === "closer" && k.ci === key.ci && k.t > key.t) : null;
+      const fits = (c) => !later || c.start + c.duration <= Math.min(later.t - 0.75, clips[key.ci].duration - 0.05 - 1.2 - 0.5); // closer needs >= 1.2 s after a 0.5 s gap
+      let cand = null;
+      for (const L of [L0, L0 * 0.75, L0 * 0.5, 2, 1.5, 1.2].filter((x) => x <= L0 + 1e-9 && x >= 1.2)) {
+        cand = findRanges(clips[key.ci], style, L).filter((c) => c.start <= key.t && c.start + c.duration >= key.t && fits(c) &&
         !chosen.some((x) => x.src === key.ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5) &&
         !clips[key.ci].samples.some((s) => s.sem && s.sem.avoid && s.sem.w > 0.6 && s.t >= c.start && s.t <= c.start + c.duration))
         .sort((a, b) => b.score - a.score || a.start - b.start)[0];
+        if (cand) break;
+      }
       if (!cand) continue;
       total += cand.duration; count[key.ci]++;
       chosen.push({ src: key.ci, start: cand.start, duration: cand.duration, score: Math.round(cand.score * 100) / 100, rep: cand.rep, reason: cand.rep.sem && cand.rep.sem.caption && !cand.rep.sem.avoid ? cand.rep.sem.caption : why(cand.rep.traits) });
     }
     for (let k = chosen.length; k < 60 && target - total >= 1; k++) {
-      const want = lens[Math.min(k, lens.length - 1)], L0 = Math.min(want, target - total), lens_k = L0 < 1 ? 1 : L0;
+      const want = lens[Math.min(k, lens.length - 1)], L0 = Math.min(want, target - total), lensK0 = L0 < 1 ? 1 : L0;
       let best = null;
+      // if nothing of the paced length fits any more, try shorter shots before ending the film early
+      for (const lens_k of [lensK0, lensK0 * 0.6, 2, 1.2].filter((x, i) => i === 0 || (x < lensK0 - 0.05 && x >= 1.2))) {
       for (let ci = 0; ci < clips.length; ci++) for (const c of findRanges(clips[ci], style, lens_k)) {
         const hit = chosen.some((x) => x.src === ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5);
         if (hit) continue;
@@ -229,6 +238,8 @@
         for (const x of chosen) if (histDist(c.rep.hist, x.rep.hist) < 0.08) sc -= 0.06; // near-duplicate look
         if (c.duration < lens_k - 0.05) sc *= 0.8 + 0.2 * (c.duration / lens_k);       // scene shorter than the slot
         if (!best || sc > best.sc + 1e-9) best = { ...c, src: ci, sc };
+      }
+      if (best) break;
       }
       if (!best) break;
       total += best.duration; count[best.src]++; chosen.push({ src: best.src, start: best.start, duration: best.duration, score: Math.round(best.sc * 100) / 100, rep: best.rep, reason: best.rep.sem && best.rep.sem.caption && !best.rep.sem.avoid ? best.rep.sem.caption : why(best.rep.traits) });
