@@ -3,6 +3,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { chromium } from "playwright-core";
 
 export const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,18 @@ export function staticServer() {
 }
 
 export const launch = () => chromium.launch({ channel: "msedge", headless: true });
+
+// Benchmarks (Windows): private MB of the Playwright Edge process tree (incl. the FFmpeg worker / WASM heap).
+export const treeMB = (root) => {
+  const out = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.PrivatePageCount)\" }"], { encoding: "utf8" });
+  const rows = out.trim().split(/\r?\n/).map((l) => l.split(" ").map(Number)), keep = new Set([root]);
+  for (let grew = true; grew;) { grew = false; for (const [p, pp] of rows) if (keep.has(pp) && !keep.has(p)) { keep.add(p); grew = true; } }
+  return rows.filter(([p]) => keep.has(p)).reduce((s, r) => s + r[2], 0) / 1048576;
+};
+// Playwright's Edge is the msedge.exe started with --remote-debugging-pipe (the user's own Edge windows are ignored).
+export const rootPid = () => Number(execFileSync("powershell.exe", ["-NoProfile", "-Command",
+  "(Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | Where-Object { $_.CommandLine -match 'remote-debugging-pipe' -and $_.CommandLine -notmatch '--type=' } | Sort-Object CreationDate | Select-Object -Last 1).ProcessId"], { encoding: "utf8" }).trim()) || NaN;
 
 // Serve the REAL FFmpeg.wasm 0.12.15 / core 0.12.10 (the versions index.html pins) from tests/node_modules.
 export async function routeRealFfmpeg(ctx) {

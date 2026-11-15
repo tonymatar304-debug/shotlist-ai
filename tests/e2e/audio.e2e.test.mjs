@@ -109,7 +109,8 @@ describe("original audio", () => {
   });
 
   test("shot starts/lengths NOT on frame boundaries stay within one frame", async () => {
-    await fixPlan([{ src: 0, start: 1.83, duration: 1.3 }, { src: 0, start: 0.31, duration: 1.37 }, { src: 0, start: 4.61, duration: 1.13 }]);
+    // first beep lands after the film's 0.4 s fade-in from black
+    await fixPlan([{ src: 0, start: 1.53, duration: 1.3 }, { src: 0, start: 0.31, duration: 1.37 }, { src: 0, start: 4.61, duration: 1.13 }]);
     await addClips([BEEP, BLUE]);
     await render();
     checkSync(await measure(), 3);

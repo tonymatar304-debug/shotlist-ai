@@ -3,20 +3,9 @@
 // Usage: node e2e/audio-bench.mjs <clip.mp4> <clip.mp4> ...
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
-import { staticServer, listen, launch, routeRealFfmpeg } from "./lib.mjs";
+import { staticServer, listen, launch, routeRealFfmpeg, treeMB, rootPid } from "./lib.mjs";
 
 const clips = process.argv.slice(2);
-const treeMB = (root) => { // private bytes of the browser process and all its descendants
-  const out = execFileSync("powershell.exe", ["-NoProfile", "-Command",
-    "Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $($_.PrivatePageCount)\" }"], { encoding: "utf8" });
-  const rows = out.trim().split(/\r?\n/).map((l) => l.split(" ").map(Number)), keep = new Set([root]);
-  for (let grew = true; grew;) { grew = false; for (const [p, pp] of rows) if (keep.has(pp) && !keep.has(p)) { keep.add(p); grew = true; } }
-  return rows.filter(([p]) => keep.has(p)).reduce((s, r) => s + r[2], 0) / 1048576;
-};
-// Playwright's Edge is the msedge.exe started with --remote-debugging-pipe (the user's own Edge windows are ignored).
-const rootPid = () => Number(execFileSync("powershell.exe", ["-NoProfile", "-Command",
-  "(Get-CimInstance Win32_Process -Filter \"name='msedge.exe'\" | Where-Object { $_.CommandLine -match 'remote-debugging-pipe' -and $_.CommandLine -notmatch '--type=' } | Sort-Object CreationDate | Select-Object -Last 1).ProcessId"], { encoding: "utf8" }).trim()) || NaN;
 const web = staticServer(), port = await listen(web);
 const music = process.env.MUSIC; // optional: a music file you have the rights to (adds a "with-audio+music" run)
 for (const mode of ["video-only", "with-audio", ...(music ? ["with-audio+music"] : [])]) {

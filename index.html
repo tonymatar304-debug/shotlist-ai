@@ -294,22 +294,25 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       vintage:"contrast=0.98:saturation=0.78:gamma=1.04"
     };
     const segments=[],withAudio=!!audio&&plan.some((p,i)=>audio[p.src===undefined?i:p.src]);
+    const last=plan.length-1;
     for(let i=0;i<plan.length;i++){
-      const item=plan[i],n=shotFrames(item),dur=n/24,fadeOut=Math.max(.1,dur-.22).toFixed(2);
+      const item=plan[i],n=shotFrames(item),dur=n/24;
+      // Hard cuts between shots; the film fades in from black and out to black only at its very start and end.
+      const fadeIn=i===0?Math.min(.4,dur/3):0,fadeOut=i===last?Math.min(.8,dur/3):0;
+      const fades=(fadeIn?",fade=t=in:st=0:d="+fadeIn.toFixed(3):"")+(fadeOut?",fade=t=out:st="+(dur-fadeOut).toFixed(3)+":d="+fadeOut.toFixed(3):"");
       const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
       // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
       segments.push("["+i+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
         "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
         "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
-        "eq="+grades[state.style]+",fade=t=in:st=0:d=0.2,fade=t=out:st="+fadeOut+
-        ":d=0.2,format=yuv420p[v"+i+"]");
+        "eq="+grades[state.style]+fades+",format=yuv420p[v"+i+"]");
       if(!withAudio)continue;
       // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
       // with 20 ms fades against clicks. A silent clip contributes silence of the same length.
       const samples=n*2000,src=item.src===undefined?i:item.src,gain=mix.gains&&mix.gains[src]||0;
       segments.push(audio[src]
         ?"["+i+":a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,"+(gain?"volume="+gain+"dB,":"")+"apad,atrim=end_sample="+samples+
-          ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-.02).toFixed(3)+":d=0.02[a"+i+"]"
+          ",asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.02,afade=t=out:st="+(dur-Math.max(.02,fadeOut)).toFixed(3)+":d="+Math.max(.02,fadeOut).toFixed(3)+"[a"+i+"]"
         :"anullsrc=r=48000:cl=stereo,atrim=end_sample="+samples+"[a"+i+"]");
     }
     const inputs=plan.map((_,i)=>"[v"+i+"]"+(withAudio?"[a"+i+"]":"")).join("");
