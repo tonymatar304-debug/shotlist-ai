@@ -21,6 +21,8 @@ Keep every clip within CLAQE's limits: 80 MB per clip, 180 MB in total, and at m
 
 ## 2. Copy the originals without conversion
 
+**Don't send clips through WhatsApp or other messengers.** They re-encode to H.264 SDR and drop HDR, so the HEVC and HDR checks can't run.
+
 - **iPhone to PC:** use a USB cable and Windows Photos, or iCloud for Windows with "Download originals". If you AirDrop to a Mac, choose **Options › All Photos Data**. Without it, iOS may convert HDR to SDR and HEVC to H.264.
 - **Trusted SDR reference (iPhone):** also export clip 1 converted to SDR by the phone itself. In Photos, Share › Options, turn HDR off (or use "Most Compatible"). Name it like `IMG_0001-sdr.mov`.
 - **Android:** use a USB cable (File Transfer mode) and copy from `DCIM/Camera`.

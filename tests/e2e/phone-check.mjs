@@ -21,7 +21,13 @@ await page.evaluate(() => { for (const id of ["a", "b"]) { const i = document.cr
 await page.setInputFiles("#pc_a", [orig]); if (refArg) await page.setInputFiles("#pc_b", [refArg]);
 await page.click('button[data-format="landscape"]'); // 640x360 film; the reference is fitted the same way
 await page.setInputFiles("#clips", [orig, orig]); // CLAQE needs 2+ clips; the first shot is what gets measured
-await page.waitForFunction(() => !document.getElementById("create").disabled, null, { timeout: 120000 });
+// Wait until Create is enabled, or every clip is measured and CLAQE refused the selection (e.g. a clip over 60 s).
+await page.waitForFunction(() => !document.getElementById("create").disabled
+  || (document.querySelectorAll("#files li").length > 0 && !/Checking…/.test(document.getElementById("files").textContent)), null, { timeout: 120000 });
+if (await page.$eval("#create", (b) => b.disabled)) {
+  console.log(`\n${path.basename(orig)}: not accepted by CLAQE\n  note: ` + await page.$eval("#renderNote", (e) => e.textContent));
+  await browser.close(); web.close(); process.exit(2);
+}
 const t0 = Date.now(); await page.click("#create");
 await page.waitForFunction(() => /Film ready|Export failed/.test(document.getElementById("status").textContent), null, { timeout: 900000 });
 const secs = (Date.now() - t0) / 1000;

@@ -8,7 +8,7 @@ The working plan for `/claqe`. Claude updates it after every verified commit. Th
 |---|---|
 | Branch | `claude-development` (never `main`) |
 | Last verified commit | `57cf294`: phone validation procedure (pushed) + `/claqe` workflow setup (local) |
-| Last pushed commit | `57cf294` |
+| Last pushed commit | `32efdde` |
 | Last full test run | 2026-11-16 on `57cf294`: frontend 114/114, backend 64/64 (+5 guard unit tests added with the setup) |
 | Current milestone | **M8 Real phone footage validation** (Approved, blocked: waiting for the user's clips) |
 
@@ -16,12 +16,28 @@ The working plan for `/claqe`. Claude updates it after every verified commit. Th
 
 Goal: prove CLAQE handles original iPhone and Android recordings: HEVC, HDR, orientation, audio, colour accuracy and export reliability. Procedure: `docs/PHONE_FOOTAGE_TESTING.md`.
 
-- [ ] **[blocked: needs the user's clips]** Run `tests/e2e/phone-check.mjs` on each clip (iPhone HDR on/off, portrait, 4K, low light, ProRes; Android SDR, HDR10, 4K60) and fill in the results table.
+- [x] **Round 1 (2026-11-16): WhatsApp-shared clips.** 4 gym clips, all H.264 Baseline 8-bit SDR (WhatsApp re-encodes them, so these are *not* camera originals). Results below.
+- [ ] **[blocked: needs camera originals copied over USB, not WhatsApp]** Run `tests/e2e/phone-check.mjs` on original iPhone clips (HDR on/off, 4K, low light, ProRes) and Android clips (HDR10, 4K60), plus the iPhone's own SDR export of the HDR clip.
 - [ ] Settle the HLG shadow convention using the iPhone's own SDR export: display-light (current, lighter shadows) or scene-light (BT.2408 reference). Change it only if real footage shows a clear mismatch (mean RGB shift).
 - [ ] Measure HEVC decode time and memory for real 1080p and 4K clips (render-bench and the phone-check render time).
-- [ ] Full-app runs with 3–5 real clips, twice in a row: no failures, every clip used.
+- [x] Full-app runs with 3 real (WhatsApp) clips, twice in a row, repeated 3 times: 6/6 "Film ready", every clip used, 38–82 s per render. Repeat with camera originals.
 - [ ] Fix any defects found, with a regression test or fixture for each, kept small and out of Git if the source footage is personal.
 - [ ] Write up the results in this file.
+
+### Round 1 results: WhatsApp-shared clips (H.264 SDR)
+
+| clip | size / length | detected | rotation | render s | ΔE mean / p95 vs itself | RGB shift | upright | audio |
+|---|---|---|---|---|---|---|---|---|
+| 10.33.03 (1) | 11.5 MB / 55 s | 464×832, 50 fps, VFR | 0 | 92 | 2.15 / 7.34 (motion + watermark) | [0,1,3] | yes | −23.7 LUFS |
+| 10.33.03 | 8.3 MB / 39 s | 1024×576, 30 fps | 270 | 54 | 1.06 / 2.96 | [0,0,1] | yes | −21.5 LUFS |
+| 10.33.04 (1) | 7.6 MB / 36 s | 464×832, 60 fps | 0 | 34–56 | 1.38 / 2.47 | [−1,1,2] | yes | −22.5 LUFS |
+| 10.33.04 | 11.2 MB / 65 s | — | — | — | refused: over the 60 s limit (correct) | | | |
+
+Findings:
+- SDR footage passes through unchanged: mean ΔE is under 3, and the remaining difference comes from motion and the watermark, not colour.
+- Rotation 270 and variable frame rate are handled; audio is decoded and levelled.
+- `phone-check` used to time out on a refused clip; it now prints CLAQE's refusal note.
+- HEVC and HDR aren't covered yet, because WhatsApp strips them.
 
 ## Remaining priorities (not yet approved: the user approves each milestone)
 
