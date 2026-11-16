@@ -108,3 +108,17 @@ export function client(base) {
   }
   return { call, get cookie() { return cookie; }, set cookie(v) { cookie = v; }, ip };
 }
+
+// Rate-limit windows are fixed, clock-aligned buckets (src/worker.js: floor(now / WINDOW_SECONDS) * WINDOW_SECONDS).
+// A test that counts up to a limit fails if it straddles a boundary (the counter resets), so such tests first wait for
+// a window with enough time left. The worker runs in a wrangler subprocess, so its clock can't be mocked from here.
+export const RATE_WINDOW_SECONDS = 600; // must equal WINDOW_SECONDS in src/worker.js (checked by a test)
+export function msUntilSafeWindow(nowMs, neededSeconds, windowSeconds = RATE_WINDOW_SECONDS) {
+  const leftMs = windowSeconds * 1000 - (nowMs % (windowSeconds * 1000));
+  return leftMs >= neededSeconds * 1000 ? 0 : leftMs + 250; // +250 ms: land safely inside the next window
+}
+export async function freshRateWindow(neededSeconds, now = Date.now) {
+  const wait = msUntilSafeWindow(now(), neededSeconds);
+  if (wait) await new Promise((r) => setTimeout(r, wait));
+  return Math.floor(now() / 1000 / RATE_WINDOW_SECONDS) * RATE_WINDOW_SECONDS; // current window_start
+}

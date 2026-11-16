@@ -1,6 +1,7 @@
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
-import { startWorker, startMockAnthropic, client, TS } from "./helpers.mjs";
+import { readFileSync } from "node:fs";
+import { startWorker, startMockAnthropic, client, TS, freshRateWindow, msUntilSafeWindow, RATE_WINDOW_SECONDS } from "./helpers.mjs";
 
 let w, mock;
 const CLIPS = [{ duration: 5 }, { duration: 8 }];
@@ -149,6 +150,7 @@ describe("rate limits", () => {
     mock.respond(200, planBody(GOOD_PLAN));
     w.sql("UPDATE settings SET value='1000' WHERE key='free_monthly_limit'"); // isolate the pass limit from the free quota
     try {
+    await freshRateWindow(60); // all 31 requests must fall in one rate-limit window (was flaky at 10-minute boundaries)
     // Rotate IPs so the per-IP limit is not what trips.
     for (let i = 1; i <= 30; i++) assert.equal((await c.call("/generate", { method: "POST", json: GOOD, ipOverride: `10.2.${i}.1` })).status, 200, "request " + i);
     assert.equal((await c.call("/generate", { method: "POST", json: GOOD, ipOverride: "10.2.99.1" })).status, 429);
@@ -158,12 +160,37 @@ describe("rate limits", () => {
     const attacker = "10.3.0.1";
     const passes = [];
     for (let i = 0; i < 4; i++) passes.push(await withPass()); // several passes behind one IP
+    await freshRateWindow(60); // all 70 requests in one window
     let first429 = 0;
     for (let i = 1; i <= 70 && !first429; i++) {
       const r = await passes[i % 4].call("/generate", { method: "POST", raw: "nope", ipOverride: attacker });
       if (r.status === 429) first429 = i; else assert.equal(r.status, 400);
     }
     assert.equal(first429, 61); // IP_LIMIT = 60
+  });
+});
+
+describe("rate-limit windows (test clock alignment)", () => {
+  test("window constant in the tests matches the worker", () => {
+    const m = /const WINDOW_SECONDS = ([0-9]+);/.exec(readFileSync(new URL("../src/worker.js", import.meta.url), "utf8"));
+    assert.equal(Number(m[1]), RATE_WINDOW_SECONDS);
+  });
+  test("msUntilSafeWindow: no wait with enough time left, else waits into the next window (fixed clock)", () => {
+    const W = RATE_WINDOW_SECONDS * 1000, start = 1_800_000_000_000 - (1_800_000_000_000 % W);
+    assert.equal(msUntilSafeWindow(start, 60), 0);
+    assert.equal(msUntilSafeWindow(start + W - 60_000, 60), 0);
+    assert.equal(msUntilSafeWindow(start + W - 59_999, 60), 59_999 + 250);
+    assert.equal(msUntilSafeWindow(start + W - 1, 60), 1 + 250);
+  });
+  test("a full pass count in the previous window does not block the current one (the old flake's cause)", async () => {
+    const c = await withPass();
+    mock.respond(200, planBody(GOOD_PLAN));
+    const uid = (await c.call("/status")).data.pass.uid;
+    const ws = await freshRateWindow(60);
+    w.sql(`INSERT INTO rate_limits (key, window_start, count) VALUES ('pass:${uid}', ${ws - RATE_WINDOW_SECONDS}, 30)`);
+    const r = await c.call("/generate", { method: "POST", json: GOOD, ipOverride: "10.4.0.1" });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.passUsage, "1/30");
   });
 });
 

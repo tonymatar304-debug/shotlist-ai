@@ -56,6 +56,11 @@ Findings:
 - Audio can end up to 6 ms short of the video on the last frame (mkv intermediate timestamps); this doesn't affect sync.
 - The memory floor is about 680 MB (1080p) and about 950 MB (4K), which is borderline for iOS Safari.
 - The Real-music beat test is blocked until the user downloads the FMA tracks.
+- **Fixed (test-only):** the backend test "pass limit: 30 valid requests allowed, 31st gets 429" failed intermittently (seen 1 in 2 runs on 2026-11-16: 200 instead of 429).
+  - Cause: rate-limit windows are fixed 600 s buckets aligned to the clock (`src/worker.js`). A test run crossing a 10-minute boundary resets the counter, about 1.3% of runs. The IP-limit test has the same exposure.
+  - Fix: both tests now wait for a window with at least 60 s left (`freshRateWindow` in `test/helpers.mjs`).
+  - Added tests: the window logic is unit-tested with a fixed clock, the constant is checked against the worker, and a regression test shows a full count in the previous window doesn't block the current one.
+  - The worker's clock can't be mocked (it runs in a `wrangler dev` subprocess), so production code is unchanged.
 
 ## Completed milestones
 
