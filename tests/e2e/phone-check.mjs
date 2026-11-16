@@ -27,9 +27,10 @@ await page.waitForFunction(() => /Film ready|Export failed/.test(document.getEle
 const secs = (Date.now() - t0) / 1000;
 const info = await page.evaluate(() => ({ status: document.getElementById("status").textContent.slice(0, 160), note: document.getElementById("resultNote").textContent,
   renderer: window.__claqeLast && window.__claqeLast.renderer, video: window.__claqeLast && window.__claqeLast.video[0], cluts: window.__claqeLast && window.__claqeLast.cluts,
-  shot: window.__claqeLast && window.__claqeLast.plan[0] }));
+  shot: window.__claqeLast && window.__claqeLast.plan[0], loud: window.__claqeLast && window.__claqeLast.loudness[0] }));
 console.log(`\n${path.basename(orig)}: ${info.status}\n  render ${secs.toFixed(1)} s, renderer ${info.renderer}`);
 console.log("  detected: " + JSON.stringify(info.video));
+console.log("  audio: " + (info.loud ? JSON.stringify(info.loud) + " (decoded and levelled)" : "none or not decodable (film is silent for this clip)"));
 console.log("  note: " + info.note);
 if (!/Film ready/.test(info.status)) { await browser.close(); web.close(); process.exit(1); }
 // One frame, 0.6 s into the first shot (after the fade-in), from CLAQE's film and from the reference at the same source time.

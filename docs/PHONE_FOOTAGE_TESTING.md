@@ -42,20 +42,29 @@ The tool renders the clip through the real app (sequential renderer, style look 
 
 ## 4. What to look for
 
-| Check | Pass |
-|---|---|
-| HDR clip detected as `hlg` (iPhone) or `pq` (HDR10) | yes |
-| SDR clip detected as `hdr: null`, ΔE vs itself ≈ 0 | yes |
-| HDR vs the phone's SDR export | mean ΔE < 3 is very close; 3–6 is noticeable side by side; > 6 means investigate. Look at skin, the shadows and the sky in the PNG. |
-| Portrait clips | upright in the film (check the PNG and the film) |
-| Clap | the sound lands on the frame where the hands meet; 1 frame (42 ms) is fine |
-| Film produced, every clip used | yes, also when the note says the browser couldn't preview a clip |
+| Area | Check | Pass |
+|---|---|---|
+| HEVC | `codec: "hevc"` detected; film produced; note the render time | yes, render completes |
+| HDR | iPhone HDR detected as `hlg` (Dolby Vision 8.4 also shows `dolbyVision`); HDR10 as `pq`; note says "HDR footage converted" | yes |
+| SDR | `hdr: null`; compared with itself ΔE ≈ 0 (CLAQE never alters it) | ΔE < 1 |
+| Colour accuracy | HDR clip vs the phone's own SDR export: ΔE mean and the RGB shift; check skin, shadows and sky in the PNG | mean < 3 very close; 3–6 noticeable; > 6 investigate |
+| Orientation | portrait clips upright in the PNG and in the film (rotation 90 or 270 in `detected`) | upright |
+| Audio | `audio:` line shows loudness (sound decoded and levelled) | not "none" for clips with sound |
+| Sync | the clap sound lands on the frame where the hands meet | within 1 frame (42 ms) |
+| Variable frame rate | low-light clip shows `vfr: true` and stays in sync | yes |
+| Export reliability | every clip gives "Film ready"; every clip is used, also when the note says the browser couldn't preview it | no failures |
 
-Also run the full app once with all clips together (serve the project folder locally the way you normally do and open `index.html`), and watch the film on a phone.
+**Full-app run (export reliability):** serve the project folder locally the way you normally do and open `index.html` in Chrome or Edge. Add 3–5 of the clips together (within the limits), create the film twice in a row, then watch it on a phone. Note any "Export failed" message, the time each render takes, and anything that looks or sounds wrong.
 
 ## 5. Report back
 
-Paste the tool output for each clip, plus anything that looked wrong (orientation, colours, sync, failures) and the browser and computer you used. For HDR clips, note the mean RGB shift against the phone's SDR export. It shows whether CLAQE's HLG conversion runs brighter or darker in the shadows than Apple's. This is the open tuning question; see the HDR notes in the test output.
+For each clip, paste the tool output and fill in one line:
+
+```
+clip | phone + setting | codec | hdr | rotation | render s | ΔE mean vs phone SDR | RGB shift | upright? | clap in sync? | problems
+```
+
+Add the browser and computer you used. For HDR clips, the RGB shift against the phone's SDR export is the key number: it shows whether CLAQE's HLG conversion is brighter or darker in the shadows than Apple's. That is the open tuning question.
 
 ## Known limits (current build)
 
