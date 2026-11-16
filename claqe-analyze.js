@@ -274,6 +274,9 @@
     video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = url;
     try {
       await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("video did not load")), 15000); video.onloadeddata = () => { clearTimeout(to); res(); }; video.onerror = () => { clearTimeout(to); rej(new Error("video cannot be decoded")); }; });
+      // No picture decoder in this browser (e.g. HEVC without hardware support, ProRes): it still "loads" the sound and
+      // duration but every frame is blank, which would silently drop the clip. Fail so the caller can fall back.
+      if (!video.videoWidth) throw new Error("this browser cannot decode the clip's picture");
       const seek = (t) => new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("seek timeout")), 8000); video.onseeked = () => { clearTimeout(to); res(); }; video.currentTime = Math.min(Math.max(0, t), Math.max(0, duration - 0.05)); });
       const grab = async (t) => { await seek(t); await new Promise((r) => requestAnimationFrame(() => r())); g.drawImage(video, 0, 0, W, H);
         const d = g.getImageData(0, 0, W, H).data, o = new Uint8Array(W * H); for (let i = 0; i < o.length; i++) o[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; o.col = colourStats(d); return o; };

@@ -50,6 +50,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
 <script src="claqe-vision.js"></script>
 <script src="claqe-music.js"></script>
 <script src="claqe-look.js"></script>
+<script src="claqe-color.js"></script>
 </head>
 <body>
 <main>
@@ -171,6 +172,21 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       video.src=url;try{video.load()}catch(e){finish(e)}
     });
   }
+  // Fallback when this browser can't open a clip at all (some phone formats): ask FFmpeg for its duration instead.
+  // undefined = still unknown (the clip is then reported as unreadable, as before).
+  let ffDurationSeq=0;
+  async function ffDuration(file){
+    const n=++ffDurationSeq,name="claqe_dur_"+n+"."+(file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g,"")||"mp4"),txt="claqe_dur_"+n+".txt";
+    let ff=null;
+    try{
+      ff=await engine();
+      await ff.writeFile(name,new Uint8Array(await file.arrayBuffer()));
+      await ff.ffprobe(["-v","error","-show_entries","format=duration","-of","default=nw=1:nk=1",name,"-o",txt]);
+      const d=parseFloat(new TextDecoder().decode(await ff.readFile(txt)));
+      return Number.isFinite(d)&&d>=1.3?d:undefined;
+    }catch(e){console.warn("CLAQE: FFmpeg could not read the clip's duration either:",e&&e.message);return undefined}
+    finally{if(ff)for(const f of [name,txt]){try{await ff.deleteFile(f)}catch(_){}}}
+  }
   $("clips").addEventListener("change",async event=>{
     const picked=Array.from(event.target.files||[]);event.target.value="";
     if(!picked.length||state.busy)return;
@@ -184,7 +200,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     state.clips.push(...newClips);refresh();
     setStatus("Added "+newClips.length+" clips. Checking durations…");
     await Promise.allSettled(newClips.map(async clip=>{
-      try{clip.duration=await durationOf(clip.file)}catch(_){clip.duration=undefined}
+      try{clip.duration=await durationOf(clip.file)}catch(_){clip.duration=await ffDuration(clip.file)}
       refresh();
     }));
     setStatus("Clips selected successfully. "+canRender().msg);
@@ -276,6 +292,23 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     }
     return state.clips.map(c=>c.hasAudio===true&&!!c.loud);
   }
+  // Video-stream metadata per clip (claqe-color.js: HDR transfer, primaries, rotation, frame rate), cached. A failed probe
+  // = null = treated as SDR, so the picture is never tone mapped by mistake.
+  async function probeVideo(ff,files){
+    for(let i=0;i<state.clips.length;i++){
+      const c=state.clips[i];
+      if(c.video!==undefined)continue;
+      c.video=null;
+      if(typeof ff.ffprobe!=="function"||!window.ClaqeColor)continue;
+      try{
+        // -v info: a "-v error" would stay in force in the shared WASM module and hide later runs' summaries (see loudness)
+        await ff.ffprobe(["-v","info","-select_streams","v:0","-show_streams","-show_entries","stream_side_data_list","-of","json",files[i],"-o","claqe_probe.json"]);
+        c.video=ClaqeColor.describe(JSON.parse(new TextDecoder().decode(await ff.readFile("claqe_probe.json"))));
+      }catch(e){console.warn("CLAQE video probe failed, treating clip as SDR:",e&&e.message)}
+      try{await ff.deleteFile("claqe_probe.json")}catch(e){}
+    }
+    return state.clips.map(c=>c.video);
+  }
   // Integrated loudness + sample peak of a file's audio (FFmpeg ebur128). null = no decodable audio.
   async function loudness(ff,file){
     state.logTap=[];let code=1;
@@ -294,15 +327,16 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   }
   const filmHasAudio=(plan,mix)=>!!(mix&&mix.audio)&&plan.some((p,i)=>mix.audio[p.src===undefined?i:p.src]);
   // Filters for shot i read from input `inp`: picture -> [v<i>], sound (when the film has clip audio) -> [a<i>].
-  function shotSegments(plan,i,inp,width,height,mix,looks){
-    const segments=[],item=plan[i],n=shotFrames(item),dur=n/24,last=plan.length-1;
+  // tone: {scale,after} from ClaqeColor.shotTone (HDR -> SDR); empty for SDR footage.
+  function shotSegments(plan,i,inp,width,height,mix,looks,tone){
+    const segments=[],item=plan[i],n=shotFrames(item),dur=n/24,last=plan.length-1;tone=tone||{scale:"",after:""};
     // Hard cuts between shots; the film fades in from black and out to black only at its very start and end.
     const fadeIn=i===0?Math.min(.4,dur/3):0,fadeOut=i===last?Math.min(.8,dur/3):0;
     const fades=(fadeIn?",fade=t=in:st=0:d="+fadeIn.toFixed(3):"")+(fadeOut?",fade=t=out:st="+(dur-fadeOut).toFixed(3)+":d="+fadeOut.toFixed(3):"");
     const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
     // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
     segments.push("["+inp+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
-      "scale="+width+":"+height+":force_original_aspect_ratio=increase,crop="+width+":"+height+",setsar=1,"+
+      "scale="+width+":"+height+":force_original_aspect_ratio=increase"+tone.scale+",crop="+width+":"+height+",setsar=1"+tone.after+","+
       "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
       looks[i]+fades+",format=yuv420p[v"+i+"]");
     if(!filmHasAudio(plan,mix))return segments;
@@ -319,7 +353,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   function filterGraph(plan,width,height,mix,looks){
     looks=looks||shotLooks(plan);
     const segments=[],withAudio=filmHasAudio(plan,mix);
-    for(let i=0;i<plan.length;i++)segments.push(...shotSegments(plan,i,i,width,height,mix,looks));
+    // HDR shots use the direct tone-mapping chain here (no extra CLUT inputs, so input numbering stays as it is).
+    for(let i=0;i<plan.length;i++)segments.push(...shotSegments(plan,i,i,width,height,mix,looks,shotTone(plan,i,null)));
     const inputs=plan.map((_,i)=>"[v"+i+"]"+(withAudio?"[a"+i+"]":"")).join("");
     segments.push(inputs+"concat=n="+plan.length+":v=1:a="+(withAudio?"1[film]"+(mix.music?"[orig]":"[aud]"):"0[film]"));
     return finishGraph(segments,plan,mix,plan.length);
@@ -342,10 +377,16 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   // Sequential pass 1, shot i: its own seeked input -> a small 24 fps intermediate at output size (graded, zoomed, faded,
   // levelled sound). Only this shot's decoder is alive; FFmpeg frees it when the run ends.
   const INTERMEDIATE={lossless:["-c:v","libx264","-preset","ultrafast","-qp","0"],visual:["-c:v","libx264","-preset","veryfast","-crf","12"]};
-  function shotCommand(plan,i,file,width,height,mix,looks,out){
+  // HDR source with a CLUT (built once per job): the CLUT image is input 1 and the shot uses the fast lookup.
+  const clipOf=(plan,i)=>state.clips[plan[i].src===undefined?i:plan[i].src];
+  function shotTone(plan,i,clutLabel){
+    const v=window.CLAQE_TONEMAP===false?null:(clipOf(plan,i)||{}).video;
+    return window.ClaqeColor?ClaqeColor.shotTone(v,"h"+i,clutLabel):{scale:"",after:""};
+  }
+  function shotCommand(plan,i,file,width,height,mix,looks,out,clut){
     const item=plan[i],withAudio=filmHasAudio(plan,mix);
-    return ["-y","-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",file,
-      "-filter_complex",shotSegments(plan,i,0,width,height,mix,looks).join(";"),"-map","[v"+i+"]",
+    return ["-y","-ss",String(item.start),"-t",String(Math.round((item.duration+0.25)*100)/100),"-i",file,...(clut?["-i",clut]:[]),
+      "-filter_complex",shotSegments(plan,i,0,width,height,mix,looks,shotTone(plan,i,clut?"1:v":null)).join(";"),"-map","[v"+i+"]",
       ...(withAudio?["-map","[a"+i+"]","-c:a","pcm_s16le"]:["-an"]),
       ...(INTERMEDIATE[window.CLAQE_INTERMEDIATE]||INTERMEDIATE.lossless),"-pix_fmt","yuv420p","-r","24",out];
   }
@@ -507,7 +548,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   async function create(){
     if(state.busy||state.clips.length<2)return;
     state.busy=true;refresh();$("result").style.display="none";
-    let ff=null,paths=[],mounts=[],aiPlan=null;
+    let ff=null,paths=[],mounts=[],aiPlan=null,planNote="";
     try{
       if(state.plan==="ai"&&aiEnabled){aiPlan=await getAIPlan();if(!aiPlan)return}
       ff=await engine();
@@ -517,7 +558,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       if(aiPlan){plan=aiPlan.plan;source=aiPlan.source}
       else{
         try{plan=(await localPlan()).plan;source="local-analysis"}
-        catch(e){console.warn("CLAQE footage analysis unavailable, using the basic preview plan:",e&&e.message);plan=buildEditPlan(state.clips);source="browser-preview"}
+        catch(e){console.warn("CLAQE footage analysis unavailable, using the basic preview plan:",e&&e.message);plan=buildEditPlan(state.clips);source="browser-preview";
+          if(/cannot decode the clip's picture|video cannot be decoded|video did not load/.test(e&&e.message))planNote="This browser can't preview one of your clips (often HEVC or ProRes from phones), so a basic edit plan was used; every clip is still in the film."}
       }
       const files=state.clips.map((c,i)=>{
         const ext=c.file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g,"");
@@ -533,6 +575,18 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
       const audio=await probeAudio(ff,files),notes=[];
       const gains=ClaqeMusic.levelGains(state.clips.map((c,i)=>audio[i]?c.loud:null),null).clips;
       state.clips.forEach((c,i)=>{if(c.hasAudio&&!audio[i]&&window.CLAQE_AUDIO!==false)notes.push("Clip "+(i+1)+"'s sound couldn't be read, so it plays silent.")});
+      // HDR phone footage (HLG / PQ): converted to SDR. One CLUT per HDR kind, built once for this job; if building it fails,
+      // those shots use the (slower) direct conversion instead. SDR clips are never touched.
+      const video=await probeVideo(ff,files),cluts={},toneOn=!!window.ClaqeColor&&window.CLAQE_TONEMAP!==false; // CLAQE_TONEMAP=false: kill switch
+      for(const v of video){
+        const key=toneOn&&ClaqeColor.clutKey(v);
+        if(!key||key in cluts)continue;
+        const f="claqe_clut_"+key+".png";cluts[key]=null;
+        try{if(window.CLAQE_TONEMAP!=="direct"&&await ff.exec(ClaqeColor.clutCommand(v,f))===0){cluts[key]=f;paths.push(f)}}catch(e){console.warn("CLAQE: tone-map lookup unavailable, using direct conversion:",e&&e.message)}
+      }
+      if(planNote)notes.push(planNote);
+      if(toneOn&&video.some(v=>ClaqeColor.needsToneMap(v)))notes.push("HDR footage converted to standard range.");
+      video.forEach((v,i)=>{if(v&&v.unsupported)notes.push("Clip "+(i+1)+" uses "+v.unsupported+"; its colours may look off.")});
       // Optional music (local development): decodable by FFmpeg too, levelled, and cuts moved onto its beats.
       let music=null;
       const m=state.music;
@@ -578,7 +632,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
             setStatus("Making your film… shot "+(i+1)+" of "+plan.length+". Browser encoding may take several minutes. Keep this tab open.");
             const out="claqe_shot_"+i+".mkv";shots.push(out);
             state.logTap=[];
-            const c=await ff.exec(shotCommand(plan,i,files[plan[i].src===undefined?i:plan[i].src],width,height,mix,looks,out));
+            const src=plan[i].src===undefined?i:plan[i].src,key=toneOn&&ClaqeColor.clutKey(video[src]);
+            const c=await ff.exec(shotCommand(plan,i,files[src],width,height,mix,looks,out,key?cluts[key]:null));
             const sz=state.logTap.map(l=>/video:\s*(\d+)\S*\s+audio:\s*(\d+)/.exec(l)).filter(Boolean).pop();state.logTap=null;
             if(sz)kb+=+sz[1]+ +sz[2];window.__claqeLast.intermediateKB=kb; // FFmpeg's own size report (measurement only)
             if(c!==0)return c;
@@ -594,7 +649,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         }finally{for(const s of shots){try{await ff.deleteFile(s)}catch(_){}}} // intermediates never outlive the job
       };
       const renderer=window.CLAQE_RENDER==="single"?"single":"sequential"; // window.CLAQE_RENDER="single": previous one-pass renderer
-      window.__claqeLast={plan,mix,looks,renderer,loudness:state.clips.map(c=>c.loud||null)}; // inspection hook for tests
+      window.__claqeLast={plan,mix,looks,renderer,loudness:state.clips.map(c=>c.loud||null),video,cluts}; // inspection hook for tests
       setStatus("Making your film… Browser encoding may take several minutes. Keep this tab open.");
       let code=1;
       if(renderer==="sequential"){try{code=await sequential(mix)}catch(e){console.warn("CLAQE sequential:",e&&e.message);code=1}}

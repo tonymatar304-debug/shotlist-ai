@@ -42,6 +42,7 @@ export async function routeRealFfmpeg(ctx) {
   // Run every real-render test against a chosen renderer: CLAQE_RENDER=single|sequential (app default: sequential).
   if (process.env.CLAQE_RENDER) await ctx.addInitScript((r) => { window.CLAQE_RENDER = r; }, process.env.CLAQE_RENDER);
   ctx.on("console", (m) => { if (/sequential render failed|CLAQE sequential:/.test(m.text())) console.log("# RENDERER FALLBACK: " + m.text().slice(0, 300)); });
+  if (process.env.CLAQE_TONEMAP) await ctx.addInitScript((r) => { window.CLAQE_TONEMAP = r === "false" ? false : r; }, process.env.CLAQE_TONEMAP);
   if (process.env.CLAQE_INTERMEDIATE) await ctx.addInitScript((r) => { window.CLAQE_INTERMEDIATE = r; }, process.env.CLAQE_INTERMEDIATE);
   await ctx.route(/cdn\.jsdelivr\.net\/npm\/@ffmpeg\/(ffmpeg|core)@[\d.]+\/dist\/(umd|esm)\//, (route) => {
     const m = /@ffmpeg\/(ffmpeg|core)@[\d.]+\/dist\/(umd|esm)\/([\w.\-]+)/.exec(route.request().url());
