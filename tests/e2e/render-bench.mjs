@@ -18,6 +18,7 @@ for (const n of shotsArg.split(",").map(Number)) {
     await page.addInitScript(({ mode, plan }) => {
       window.CLAQE_RENDER = mode.startsWith("sequential") ? "sequential" : "single";
       if (mode === "sequential-visual") window.CLAQE_INTERMEDIATE = "visual";
+      if (mode.endsWith("-lazy")) window.CLAQE_LAZY = true; // WORKERFS: FFmpeg reads the File instead of an in-memory copy
       window.__fixedPlan = plan;
     }, { mode, plan });
     page.on("console", (m) => /sequential render failed|CLAQE sequential:/.test(m.text()) && console.log("  FALLBACK " + m.text().slice(0, 200)));
