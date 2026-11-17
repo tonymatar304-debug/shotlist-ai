@@ -60,7 +60,7 @@ test("hard cuts between shots; fade in from black at the start and out to black 
   await ctx.close();
 });
 
-test("shot matching: exposure spread and a warm cast are reduced, conservatively; same plan without matching for comparison", async () => {
+test("shot matching: a warm cast is reduced (channel gains), well exposed shots keep their exposure; same plan without matching for comparison", async () => {
   const plan = [{ src: 0, start: 0.5, duration: 2 }, { src: 1, start: 0.5, duration: 2 }, { src: 2, start: 0.5, duration: 2 }, { src: 1, start: 2.5, duration: 1.5 }];
   const res = {};
   for (const match of [false, true]) {
@@ -88,9 +88,10 @@ test("shot matching: exposure spread and a warm cast are reduced, conservatively
   console.log(`# looks on: ${on.looks.join(" | ")}`);
   assert.ok(off.looks.every((l) => l === off.looks[0]), "without matching every shot has the same look");
   assert.ok(new Set(on.looks).size >= 3, "matched shots get their own grade");
-  assert.ok(sd(ys(on)) < sd(ys(off)) * 0.8, "exposure spread reduced");
-  assert.ok(on.px[0].y > off.px[0].y + 0.02 && on.px[1].y < off.px[1].y - 0.02, "dark shot lifted, bright shot lowered");
-  assert.ok(on.px[0].y < on.px[1].y - 0.2, "conservative: shots keep their own exposure order and character");
+  // Since 2026-11-18 exposure is kept as filmed inside mean luma 0.10..0.70 (low-key footage stays low-key; only gross
+  // errors move). These fixtures (0.15 .. 0.70) are all inside: matching must not pull them toward each other.
+  on.px.forEach((p, i) => assert.ok(Math.abs(p.y - off.px[i].y) < 0.03, `shot ${i} exposure kept: ${off.px[i].y.toFixed(3)} -> ${p.y.toFixed(3)}`));
+  assert.ok(sd(ys(on)) > sd(ys(off)) * 0.9, "no flattening of the exposure spread");
   assert.ok(rb(on.px[2]) < rb(off.px[2]) - 0.01 && rb(on.px[2]) > 0.02, "warm cast reduced, not removed");
   assert.ok(Math.abs(on.px[1].y - on.px[3].y) < 0.03, "same footage, same grade");
 });

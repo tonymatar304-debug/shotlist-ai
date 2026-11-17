@@ -72,3 +72,40 @@ test("client vision(): posts request+images with credentials; errors never yield
   const bad = await createClient({ baseUrl: "http://127.0.0.1:8787", fetch: async () => ({ ok: false, status: 502, json: async () => ({ ok: false, code: "vision_unusable" }) }) }).vision({ request: {}, images: [] });
   assert.equal(bad.ok, false); assert.equal(bad.code, "vision_unusable"); assert.equal(bad.vision, undefined);
 });
+
+// ---------------- v2 timeline (contact sheets -> phase segments) ----------------
+// Gym-like but generic: setup, then the activity, then the operator walking to the camera (the BIGGEST motion in the clip).
+const lift = (d, walkFrom) => clip(d, (t) => (t >= walkFrom ? { look: 0.45, resid: 0.3, motion: 0.3, sharp: 0.012 } : t >= 6 ? { look: 0.5, resid: 0.1, motion: 0.1, sharp: 0.012 } : { look: 0.52, resid: 0.04, motion: 0.05 }));
+
+test("timeline request: one sheet per clip, 8..30 increasing tile times inside the clip; layout fits 1024 px", () => {
+  const req = V.buildTimelineRequest([clip(55), clip(9)], { style: "dynamic", filmSeconds: 30 });
+  assert.equal(req.version, 2); assert.deepEqual(req.clips.map((c) => c.sheet), ["s0", "s1"]);
+  for (const c of req.clips) { assert.ok(c.tiles.length >= 8 && c.tiles.length <= 30); c.tiles.forEach((t, i) => assert.ok(t > 0 && t < c.duration && (!i || t > c.tiles[i - 1]))); }
+  for (const [w, h] of [[464, 832], [1920, 1080]]) { const L = V.sheetLayout(28, w, h); assert.ok(L.cols * L.tw <= 1024 && L.rows * L.th <= 1024 && L.tw >= 100, JSON.stringify(L)); }
+});
+
+test("timeline reply is untrusted: unknown phases/clips dropped, times clamped, overlaps trimmed, mostly-empty reply rejected", () => {
+  const req = V.buildTimelineRequest([clip(40), clip(30)], { style: "cinematic", filmSeconds: 20 });
+  const v = V.validateTimelineResponse({ version: 2, story: "<b>x</b>", clips: [
+    { index: 0, summary: "s", segments: [{ start: -3, end: 10, phase: "setup", what: "a<script>", quality: 2, importance: 0.5 }, { start: 8, end: 50, phase: "action", what: "b", quality: 0.9, importance: 0.8 }, { start: 1, end: 2, phase: "explode" }], moments: [{ t: 99, what: "x" }, { t: 20, what: "best", importance: 0.9 }] },
+    { index: 7, segments: [] }, { index: 1, segments: [{ start: 0, end: 30, phase: "action" }] }] }, req);
+  const c0 = v.clips[0];
+  assert.deepEqual(c0.segments.map((s) => [s.start, s.end, s.phase]), [[0, 10, "setup"], [10, 40, "action"]]);
+  assert.equal(c0.segments[0].quality, 1); assert.ok(!/[<>]/.test(c0.segments[0].what + v.story));
+  assert.deepEqual(c0.moments.map((m) => m.t), [20]);
+  assert.equal(V.validateTimelineResponse({ version: 2, clips: [{ index: 0, segments: [{ start: 0, end: 3, phase: "action" }] }] }, req), null, "covers < half the clip");
+  assert.equal(V.validateTimelineResponse({ version: 1, clips: [] }, req), null);
+});
+
+test("timeline drives the edit: walk-to-camera (most motion) and camera handling are never used; action is", () => {
+  const cs = [lift(39, 33), lift(36, 30)];
+  const local = A.planFilm(cs.map((c) => ({ ...c, samples: c.samples.map((s) => ({ ...s })) })), "dynamic", 20);
+  assert.ok(covers(local, 0, 33, 39) || covers(local, 1, 30, 36), "local analysis alone takes the walk-off (why semantics are needed)");
+  const req = V.buildTimelineRequest(cs, { style: "dynamic", filmSeconds: 20 });
+  const reply = V.mockTimeline(req, { 0: [[0, 6, "setup", 0.5], [6, 33, "action", 0.7], [33, 39, "handling", 0]], 1: [[0, 6, "setup", 0.4], [6, 18, "action", 0.7], [18, 24, "peak", 0.9], [24, 30, "action", 0.6], [30, 36, "handling", 0]] });
+  V.applyTimeline(cs, V.validateTimelineResponse(reply, req));
+  const p = A.planFilm(cs, "dynamic", 20);
+  assert.ok(!covers(p, 0, 33.1, 39) && !covers(p, 1, 30.1, 36), "no handling footage: " + JSON.stringify(p.plan));
+  assert.ok(covers(p, 1, 18, 24), "the peak is in the film");
+  assert.ok(p.plan.filter((x) => x.reason && /mock (action|peak|setup)/.test(x.reason)).length >= p.plan.length - 1, "reasons come from the model's segments");
+});

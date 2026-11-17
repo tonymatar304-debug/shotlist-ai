@@ -70,3 +70,49 @@ test("frame features: sharpness, exposure, pan vs subject motion", () => {
   const other = Uint8Array.from({ length: W * H }, (_, i) => (i * 104729) % 256), chaos = A.pairMotion(noise, other);
   assert.ok(chaos.resid > 0.1, JSON.stringify(chaos));                                                                       // unrelated frames: residual stays high
 });
+
+// ---- block motion field: camera vs subject (aspect-correct frames), vibration, occlusions ----
+// Non-repeating smooth texture (value noise on a 4 px grid, bilinear): a periodic pattern would also match at false offsets.
+const hash = (i, j) => { let k = (i * 374761393 + j * 668265263) | 0; k = Math.imul(k ^ (k >>> 13), 1274126177); return ((k ^ (k >>> 16)) >>> 0) % 256; };
+const noise = (x, y) => { const X = Math.floor(x / 4), Y = Math.floor(y / 4), fx = x / 4 - X, fy = y / 4 - Y;
+  return (hash(X, Y) * (1 - fx) + hash(X + 1, Y) * fx) * (1 - fy) + (hash(X, Y + 1) * (1 - fx) + hash(X + 1, Y + 1) * fx) * fy; };
+const tex = (w, h, f = noise) => Uint8Array.from({ length: w * h }, (_, i) => Math.max(0, Math.min(255, f(i % w, Math.floor(i / w)))));
+const shift = (w, h, dx, dy) => tex(w, h, (x, y) => noise(x + dx, y + dy));
+
+test("motion field: aspect-correct size; sub-pixel camera vibration is camera, not subject motion", () => {
+  assert.deepEqual(A.motionSize(464, 832), [71, 128]); assert.deepEqual(A.motionSize(1920, 1080), [128, 72]);
+  const [w, h] = [72, 128], a = tex(w, h), b = shift(w, h, 0.6, -0.4);       // whole frame moves 0.7 px: a tripod knock
+  const m = A.motionField(a, b, w, h);
+  assert.ok(m.pan > 0.4 && m.pan < 1.2, JSON.stringify(m));
+  assert.ok(m.resid < 0.02, "vibration must not read as subject motion " + JSON.stringify(m));
+  assert.ok(A.pairMotion(a.subarray(0, A.W * A.H), b.subarray(0, A.W * A.H)).resid > 0.02, "legacy estimator did count it");
+});
+
+test("motion field: a moving subject on a still camera is subject motion, camera stays still", () => {
+  const [w, h] = [128, 72], a = tex(w, h), b = Uint8Array.from(a);
+  for (let y = 20; y < 52; y++) for (let x = 40; x < 76; x++) b[y * w + x] = a[y * w + x - 3]; // a 36x32 region moves 3 px
+  const m = A.motionField(a, b, w, h);
+  assert.ok(m.pan < 0.2 && m.resid > 0.05, JSON.stringify(m));
+});
+
+test("temporal marks: vibration is jitter, a steady pan is not; a passing occluder is transient, not a scene cut", () => {
+  const base = (t, o) => ({ ...mk(t, o), cam: o.cam || [0, 0], pan: Math.hypot(...(o.cam || [0, 0])), change: o.change ?? 0.05 });
+  const vib = A.linkScenes([0, 1, 2, 3, 4].map((t) => base(t + 0.5, { cam: t % 2 ? [0.6, 0] : [-0.6, 0] })));
+  assert.ok(vib.slice(1, 4).every((s) => s.jitter > 0.3), JSON.stringify(vib.map((s) => s.jitter)));
+  const pan = A.linkScenes([0, 1, 2, 3, 4].map((t) => base(t + 0.5, { cam: [1.2, 0.1] })));
+  assert.ok(pan.every((s) => s.jitter === 0));
+  const occl = clip(20, (t) => (t === 10.5 ? { look: 0.05, sharp: 0.001 } : { look: 0.5 }));
+  const s = occl.samples.find((x) => x.t === 10.5);
+  assert.ok(s.transient, "occluder marked transient");
+  assert.equal(A.sceneRanges(occl).length, 1, "and not split as a scene cut");
+  const p = A.planFilm([occl, clip(20, () => ({}))], "cinematic", 10);
+  assert.ok(!overlaps(p, 0, 10, 11), "shot avoids the occluded moment: " + JSON.stringify(p.plan));
+});
+
+test("motion field: a fast steady pan (4-12 px per sample pair) is camera motion, not an occluder (QA regression)", () => {
+  const [w, h] = [128, 72], a = tex(w, h);
+  for (const d of [4, 6, 9, 12]) {
+    const m = A.motionField(a, shift(w, h, d, 0), w, h);
+    assert.ok(Math.abs(m.pan - d) < 0.6 && m.resid < 0.05 && m.change < 0.2, d + " px: " + JSON.stringify(m));
+  }
+});

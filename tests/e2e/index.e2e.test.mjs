@@ -122,7 +122,7 @@ describe("browser preview (no API configured)", () => {
     assert.match(await text("#resultNote"), /^Preview export/);
     assert.ok(!/AI/.test(await text("#resultNote")));
     assert.match(await graph(), /^\[0:v\]fps=24:start_time=0,trim=end_frame=\d+,/);
-    assert.match(await graph(), /colorbalance=rs=0\.03:gs=0\.01:bs=-0\.02/); // vintage look applied
+    assert.match(await graph(), /colorbalance=rs=0\.015:bs=-0\.02:rh=0\.015:bh=-0\.025/); // vintage look applied
     assert.equal(api.calls.length, 0);
   });
   test("renderer failure shows an actionable error and no result", async () => {

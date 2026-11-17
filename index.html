@@ -245,9 +245,21 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     state.lastError=()=>lastError;
     return ff;
   }
-  function makeWatermark(){
-    const canvas=document.createElement("canvas"); canvas.width=128;canvas.height=34;
-    const ctx=canvas.getContext("2d");
+  // Film size: the largest clip's short side, 360..720 px (even), in 9:16 or 16:9. Never below the footage (360p threw detail
+  // away) and never an in-app upscale above it (that adds no detail, only render time); players and Instagram scale up anyway.
+  // CLAQE_MAX_SHORT (dev/bench) changes the cap.
+  function filmSize(format,video){
+    const shorts=(video||[]).filter(v=>v&&v.width&&v.height).map(v=>Math.min(v.width,v.height));
+    // Phones and low-memory devices: 540 max (lossless per-shot intermediates live in the wasm in-memory FS; 720p is ~1.8x
+    // the bytes of 540p). Desktop: 720. Not yet measured on real phones (M13).
+    const small=(navigator.deviceMemory&&navigator.deviceMemory<=4)||matchMedia("(pointer:coarse)").matches;
+    const cap=+window.CLAQE_MAX_SHORT||(small?540:720),short=Math.max(360,Math.min(cap,shorts.length?Math.max(...shorts):360))&~1;
+    const long=Math.round(short*16/9/2)*2;
+    return format==="vertical"?[short,long]:[long,short];
+  }
+  function makeWatermark(k=1){ // k = film short side / 360: the mark keeps its size relative to the picture
+    const canvas=document.createElement("canvas"); canvas.width=Math.round(128*k);canvas.height=Math.round(34*k);
+    const ctx=canvas.getContext("2d");ctx.scale(k,k);
     ctx.font="800 19px Unbounded, Arial, sans-serif";ctx.textBaseline="middle";
     ctx.shadowColor="rgba(0,0,0,.9)";ctx.shadowBlur=7;ctx.fillStyle="#fff";
     ctx.fillText("claqe.",5,17);
@@ -333,11 +345,9 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
     // Hard cuts between shots; the film fades in from black and out to black only at its very start and end.
     const fadeIn=i===0?Math.min(.4,dur/3):0,fadeOut=i===last?Math.min(.8,dur/3):0;
     const fades=(fadeIn?",fade=t=in:st=0:d="+fadeIn.toFixed(3):"")+(fadeOut?",fade=t=out:st="+(dur-fadeOut).toFixed(3)+":d="+fadeOut.toFixed(3):"");
-    const step=i%2===0?"0.0006,1.06":"0.00035,1.04";
     // fps first (start_time=0 keeps the input's own timestamps, i.e. the same clock as its audio), then cut by frame count.
     segments.push("["+inp+":v]fps=24:start_time=0,trim=end_frame="+n+",setpts=PTS-STARTPTS,"+
       "scale="+width+":"+height+":force_original_aspect_ratio=increase"+tone.scale+",crop="+width+":"+height+",setsar=1"+tone.after+","+
-      "zoompan=z='min(zoom+"+step+")':d=1:s="+width+"x"+height+":fps=24,"+
       looks[i]+fades+",format=yuv420p[v"+i+"]");
     if(!filmHasAudio(plan,mix))return segments;
     // Original audio of the same seeked input, cut to exactly the shot's length (padded if the track ends early),
@@ -376,6 +386,9 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   }
   // Sequential pass 1, shot i: its own seeked input -> a small 24 fps intermediate at output size (graded, zoomed, faded,
   // levelled sound). Only this shot's decoder is alive; FFmpeg frees it when the run ends.
+  // Final film: x264 veryfast CRF 21, High profile (CABAC, deblocking, 8x8 transform; ultrafast/CRF 28 left visible 8x8 blocks),
+  // tagged BT.709 so players decode the colours as rendered. Phone/Instagram friendly (yuv420p, +faststart).
+  const FINAL_VIDEO=["-c:v","libx264","-preset","veryfast","-crf","21","-profile:v","high","-colorspace","bt709","-color_primaries","bt709","-color_trc","bt709","-color_range","tv"];
   const INTERMEDIATE={lossless:["-c:v","libx264","-preset","ultrafast","-qp","0"],visual:["-c:v","libx264","-preset","veryfast","-crf","12"]};
   // HDR source with a CLUT (built once per job): the CLUT image is input 1 and the shot uses the fast lookup.
   const clipOf=(plan,i)=>state.clips[plan[i].src===undefined?i:plan[i].src];
@@ -473,18 +486,21 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
   async function visionPlan(fail){
     const local=await localPlan(),analysed=state.clips.map(c=>c.analysis);
     const soft=msg=>({plan:local.plan,source:"local-analysis",note:msg+" Used local footage analysis instead."});
+    // Default: timeline mode (one time-labelled contact sheet per clip -> phase segments). "frames": the older 12-still mode.
+    const timeline=window.CLAQE_VISION_MODE!=="frames";
     let req,images;
     try{
-      req=ClaqeVision.buildVisionRequest(analysed,{style:state.style,filmSeconds:LIMITS.filmSeconds});
-      setStatus("Sending "+ClaqeVision.frameIds(req).length+" small frames to the AI vision editor…");
-      images=await ClaqeVision.captureForRequest(state.clips.map(c=>c.file),req);
+      req=timeline?ClaqeVision.buildTimelineRequest(analysed,{style:state.style,filmSeconds:LIMITS.filmSeconds}):ClaqeVision.buildVisionRequest(analysed,{style:state.style,filmSeconds:LIMITS.filmSeconds});
+      setStatus(timeline?"Sending one contact sheet per clip to the AI vision editor…":"Sending "+ClaqeVision.frameIds(req).length+" small frames to the AI vision editor…");
+      images=timeline?await ClaqeVision.captureSheets(state.clips.map(c=>c.file),req):await ClaqeVision.captureForRequest(state.clips.map(c=>c.file),req);
     }catch(e){return soft("Couldn't prepare frames for AI vision.")}
     const r=await api.vision({request:req,images});
     api.status().then(x=>{if(x.ok)setAINote(ClaqeAPI.describeQuota(x.data))});
     if(!r.ok)return SOFT_FAIL.includes(r.code)?soft(r.message):fail(r.message);
-    const v=ClaqeVision.validateVisionResponse(r.vision,req);
+    const v=timeline?ClaqeVision.validateTimelineResponse(r.vision,req):ClaqeVision.validateVisionResponse(r.vision,req);
     if(!v)return soft(ClaqeAPI.MESSAGES.vision_unusable.text);
-    ClaqeVision.applyVision(analysed,req,v);
+    if(timeline)ClaqeVision.applyTimeline(analysed,v);else ClaqeVision.applyVision(analysed,req,v);
+    window.__claqeVision={mode:timeline?"timeline":"frames",reply:v}; // inspection hook for tests/benchmarks
     return {plan:ClaqeAnalyze.planFilm(analysed,state.style,LIMITS.filmSeconds).plan,source:"ai-vision"};
   }
   async function getAIPlan(){
@@ -570,8 +586,6 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         await ff.writeFile(files[i],new Uint8Array(await state.clips[i].file.arrayBuffer()));
         paths.push(files[i]);
       }
-      await ff.writeFile("claqe_mark.png",await makeWatermark());paths.push("claqe_mark.png");
-      const [width,height]=state.format==="vertical"?[360,640]:[640,360];
       const audio=await probeAudio(ff,files),notes=[];
       const gains=ClaqeMusic.levelGains(state.clips.map((c,i)=>audio[i]?c.loud:null),null).clips;
       state.clips.forEach((c,i)=>{if(c.hasAudio&&!audio[i]&&window.CLAQE_AUDIO!==false)notes.push("Clip "+(i+1)+"'s sound couldn't be read, so it plays silent.")});
@@ -584,6 +598,8 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         const f="claqe_clut_"+key+".png";cluts[key]=null;
         try{if(window.CLAQE_TONEMAP!=="direct"&&await ff.exec(ClaqeColor.clutCommand(v,f))===0){cluts[key]=f;paths.push(f)}}catch(e){console.warn("CLAQE: tone-map lookup unavailable, using direct conversion:",e&&e.message)}
       }
+      const [width,height]=filmSize(state.format,video);
+      await ff.writeFile("claqe_mark.png",await makeWatermark(Math.min(width,height)/360));paths.push("claqe_mark.png");
       if(planNote)notes.push(planNote);
       if(toneOn&&video.some(v=>ClaqeColor.needsToneMap(v)))notes.push("HDR footage converted to standard range.");
       video.forEach((v,i)=>{if(v&&v.unsupported)notes.push("Clip "+(i+1)+" uses "+v.unsupported+"; its colours may look off.")});
@@ -618,7 +634,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
         command.push("-loop","1","-i","claqe_mark.png");
         if(mix&&mix.music)command.push("-ss",String(mix.music.start),"-t",String(Math.round((+total+1)*100)/100),"-i",mix.music.file);
         command.push("-filter_complex",filterGraph(plan,width,height,mix));
-        command.push("-map","[out]",...(mix?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),"-c:v","libx264","-preset","ultrafast","-crf","28",
+        command.push("-map","[out]",...(mix?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),...FINAL_VIDEO,
           "-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",total,"claqe_film.mp4");
         return command;
       };
@@ -644,7 +660,7 @@ footer{margin-top:50px;border-top:1px solid var(--line);padding-top:20px;color:v
           const command=["-y","-f","concat","-safe","0","-i","claqe_shots.txt","-loop","1","-i","claqe_mark.png"];
           if(jm&&jm.music)command.push("-ss",String(jm.music.start),"-t",String(Math.round((+total+1)*100)/100),"-i",jm.music.file);
           command.push("-filter_complex",joinGraph(plan,jm),"-map","[out]",...(jm?["-map","[aud]","-c:a","aac","-b:a","128k"]:["-an"]),
-            "-c:v","libx264","-preset","ultrafast","-crf","28","-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",total,"claqe_film.mp4");
+            ...FINAL_VIDEO,"-pix_fmt","yuv420p","-r","24","-movflags","+faststart","-t",total,"claqe_film.mp4");
           return await ff.exec(command);
         }finally{for(const s of shots){try{await ff.deleteFile(s)}catch(_){}}} // intermediates never outlive the job
       };

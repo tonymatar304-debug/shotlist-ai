@@ -133,5 +133,105 @@
     return images;
   }
 
-  return { VERSION, MAX_FRAMES, chooseFrames, buildVisionRequest, validateVisionResponse, applyVision, mockVision, captureFrames, captureForRequest, frameIds };
+  // ================= v2 "timeline": one contact sheet per clip -> phase segments (Worker src/timeline.js) =================
+  // The model sees evenly spaced, time-labelled tiles of the WHOLE clip, so it can tell setup from action and the operator
+  // walking to the camera from the activity. Generic phases; no subject-specific rules.
+  const PHASES = ["setup", "action", "peak", "rest", "ending", "transition", "handling", "irrelevant"];
+  const SHEET_SIDE = 1024, SHEET_MAX_B64 = 300000, MAX_TILES = 30;
+  // Tiles every ~1.5-2.5 s (8..MAX_TILES per clip), at tile centres, rounded to 0.1 s.
+  function tileTimes(duration, max = MAX_TILES) {
+    const n = Math.max(8, Math.min(max, Math.round(duration / 2)));
+    return Array.from({ length: n }, (_, k) => Math.round(((k + 0.5) * duration / n) * 10) / 10).filter((t, k, a) => k === 0 || t > a[k - 1]);
+  }
+  function buildTimelineRequest(clips, { style, filmSeconds }) {
+    return { version: 2, style, filmSeconds, clips: clips.map((c, ci) => ({ index: ci, duration: Math.round(c.duration * 10) / 10, sheet: "s" + ci, tiles: tileTimes(c.duration) })) };
+  }
+  // Grid that fits SHEET_SIDE: portrait clips get more columns. -> { cols, rows, tw, th }
+  function sheetLayout(n, vw, vh, side = SHEET_SIDE) {
+    let best = null;
+    for (let cols = 2; cols <= 10; cols++) {
+      const rows = Math.ceil(n / cols), tw = Math.floor(Math.min(side / cols, (side / rows) * (vw / vh))), th = Math.floor(tw * vh / vw);
+      if (tw >= 48 && (!best || tw > best.tw)) best = { cols, rows, tw, th };
+    }
+    return best;
+  }
+  async function captureSheet(file, times) {
+    const v = document.createElement("video"), url = URL.createObjectURL(file); v.muted = true; v.preload = "auto"; v.src = url;
+    try {
+      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error("cannot decode")); });
+      const L = sheetLayout(times.length, v.videoWidth, v.videoHeight), c = document.createElement("canvas");
+      c.width = L.cols * L.tw; c.height = L.rows * L.th; const g = c.getContext("2d");
+      g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height); g.font = "bold " + Math.max(11, Math.round(L.tw / 9)) + "px sans-serif"; g.textBaseline = "top";
+      for (let k = 0; k < times.length; k++) {
+        await new Promise((res) => { v.onseeked = res; v.currentTime = times[k]; });
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        const x = (k % L.cols) * L.tw, y = Math.floor(k / L.cols) * L.th, label = times[k].toFixed(1) + "s", lw = g.measureText(label).width + 6;
+        g.drawImage(v, x, y, L.tw, L.th); g.fillStyle = "rgba(0,0,0,.65)"; g.fillRect(x, y, lw, Math.max(13, Math.round(L.tw / 9)) + 4); g.fillStyle = "#ff0"; g.fillText(label, x + 3, y + 2);
+      }
+      let q = 0.8, data = c.toDataURL("image/jpeg", q).split(",")[1];
+      while (data.length > SHEET_MAX_B64 && q > 0.35) { q -= 0.1; data = c.toDataURL("image/jpeg", q).split(",")[1]; }
+      return data;
+    } finally { v.removeAttribute("src"); try { v.load(); } catch (_) {} URL.revokeObjectURL(url); }
+  }
+  async function captureSheets(files, req) {
+    const images = [];
+    for (const c of req.clips) images.push({ id: c.sheet, data: await captureSheet(files[c.index], c.tiles) });
+    return images;
+  }
+  // Mirrors the Worker's validateTimelineOutput (the reply is untrusted even after the Worker checked it).
+  function validateTimelineResponse(out, req) {
+    if (!out || typeof out !== "object" || out.version !== 2 || !Array.isArray(out.clips)) return null;
+    const unit = (x, d = 0.5) => (typeof x === "number" && Number.isFinite(x) ? clamp(x) : d), clips = [], seen = new Set();
+    for (const c of out.clips) {
+      const rc = c && Number.isInteger(c.index) && req.clips[c.index];
+      if (!rc || seen.has(c.index) || !Array.isArray(c.segments)) continue;
+      seen.add(c.index);
+      const segs = c.segments.filter((s) => s && PHASES.includes(s.phase) && Number.isFinite(s.start) && Number.isFinite(s.end))
+        .map((s) => ({ start: clamp(s.start, 0, rc.duration), end: clamp(s.end, 0, rc.duration), phase: s.phase, what: clean(s.what, 80), quality: unit(s.quality), importance: unit(s.importance) }))
+        .filter((s) => s.end - s.start >= 0.2).sort((a, b) => a.start - b.start).slice(0, 24);
+      for (let i = 1; i < segs.length; i++) if (segs[i].start < segs[i - 1].end) segs[i].start = segs[i - 1].end;
+      const segments = segs.filter((s) => s.end - s.start >= 0.2);
+      if (!segments.length || segments.reduce((a, s) => a + s.end - s.start, 0) < rc.duration * 0.5) continue;
+      const moments = (Array.isArray(c.moments) ? c.moments : []).filter((m) => m && Number.isFinite(m.t) && m.t >= 0 && m.t <= rc.duration).slice(0, 3)
+        .map((m) => ({ t: Math.round(m.t * 10) / 10, what: clean(m.what, 80), importance: unit(m.importance) }));
+      clips.push({ index: c.index, summary: clean(c.summary, 140), segments, moments });
+    }
+    if (clips.length < Math.ceil(req.clips.length / 2)) return null;
+    return { version: 2, story: clean(out.story, 200), clips: clips.sort((a, b) => a.index - b.index) };
+  }
+  // Phase -> how the planner should treat that footage. avoid: never used. role feeds the opener/highlight/closer ordering.
+  const PHASE_RULE = {
+    setup: { value: 0.45, role: "opener" }, action: { value: 0.75, role: "filler" }, peak: { value: 1, role: "highlight" }, rest: { value: 0.25, role: "filler" },
+    ending: { value: 0.6, role: "closer" }, transition: { value: 0.3, role: "filler" }, handling: { avoid: true }, irrelevant: { avoid: true },
+  };
+  // Every sample inside a segment gets the segment's semantic judgement (sharp boundaries: the model saw the whole clip).
+  // Model moments become key moments the planner seeds first. Unsegmented time keeps its local score only.
+  function applyTimeline(analysed, tl) {
+    analysed.forEach((clip) => { clip.samples.forEach((s) => { delete s.sem; }); clip.vision = []; clip.timeline = null; });
+    for (const c of tl.clips) {
+      const clip = analysed[c.index]; if (!clip) continue;
+      clip.timeline = c;
+      for (const s of clip.samples) {
+        const seg = c.segments.find((g) => s.t >= g.start && (s.t < g.end || (g === c.segments[c.segments.length - 1] && s.t <= g.end)));
+        if (!seg) continue;
+        const r = PHASE_RULE[seg.phase], avoid = !!r.avoid || seg.quality < 0.25;
+        const importance = avoid ? 0 : clamp(0.55 * r.value + 0.45 * seg.importance) * (0.5 + 0.5 * seg.quality);
+        s.sem = { w: 0.85, importance, avoid, must: seg.phase === "peak", caption: seg.what, role: avoid ? "avoid" : r.role, conf: 0.85, phase: seg.phase };
+      }
+      // Key moments (and a confident setup/ending) seed the plan; only inside usable segments.
+      const usable = (t) => { const g = c.segments.find((x) => t >= x.start && t < x.end); return g && !PHASE_RULE[g.phase].avoid && g.quality >= 0.25 ? g : null; };
+      for (const m of c.moments) { const g = usable(m.t); if (g) clip.vision.push({ t: m.t, role: "highlight", importance: Math.max(m.importance, 0.6), confidence: 0.85 }); }
+      for (const g of c.segments) if ((g.phase === "setup" || g.phase === "ending") && g.importance >= 0.5 && g.quality >= 0.5)
+        clip.vision.push({ t: Math.round(((g.start + g.end) / 2) * 10) / 10, role: PHASE_RULE[g.phase].role, importance: g.importance, confidence: 0.75 });
+    }
+    return analysed;
+  }
+  // Deterministic stand-in for the model (tests/dev): segments from rules[clipIndex] = [[start, end, phase, importance?], ...].
+  function mockTimeline(req, rules = {}) {
+    return { version: 2, story: "mock timeline", clips: req.clips.map((c) => ({ index: c.index, summary: "mock clip " + c.index,
+      segments: (rules[c.index] || [[0, c.duration, "action", 0.6]]).map(([start, end, phase, importance = 0.6, quality = 0.8]) => ({ start, end, phase, what: "mock " + phase, quality, importance })),
+      moments: [] })) };
+  }
+
+  return { VERSION, MAX_FRAMES, PHASES, tileTimes, sheetLayout, buildTimelineRequest, captureSheets, validateTimelineResponse, applyTimeline, mockTimeline, chooseFrames, buildVisionRequest, validateVisionResponse, applyVision, mockVision, captureFrames, captureForRequest, frameIds };
 });

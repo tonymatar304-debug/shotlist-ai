@@ -70,7 +70,7 @@ test("HDR (HLG, PQ) is detected and tone mapped to match SDR; SDR is never touch
   assert.deepEqual(Object.keys(r.last.cluts).sort(), ["hlg_bt2020", "pq_bt2020"]); assert.ok(Object.values(r.last.cluts).every(Boolean), "CLUTs built");
   const shots = r.last.cmds.filter((c) => /^claqe_shot_\d+\.mkv$/.test(c.at(-1))), graph = (c) => c[c.indexOf("-filter_complex") + 1];
   assert.equal(shots.length, 4);
-  for (const k of [0, 3]) assert.doesNotMatch(graph(shots[k]), /haldclut|zscale|tonemap|in_color_matrix/, "SDR shot " + k + " untouched");
+  for (const k of [0, 3]) assert.doesNotMatch(graph(shots[k]), /haldclut|zscale|tonemap|in_color_matrix=bt2020/, "SDR shot " + k + " untouched (no tone mapping; the look's own bt709 RGB step is fine)");
   for (const k of [1, 2]) assert.match(graph(shots[k]), /haldclut=interp=tetrahedral/, "HDR shot " + k + " uses the CLUT");
   console.log(`# HDR vs SDR chart, dE2000 mean/max/skin: HLG ${r.hlg.mean.toFixed(2)}/${r.hlg.max.toFixed(2)}/${r.hlg.skin.map((x) => x.toFixed(2))}, PQ ${r.pq.mean.toFixed(2)}/${r.pq.max.toFixed(2)}/${r.pq.skin.map((x) => x.toFixed(2))}; render ${r.secs.toFixed(1)} s`);
   for (const m of [r.hlg, r.pq]) { assert.ok(m.mean < 3, "mean dE " + m.mean); assert.ok(Math.max(...m.skin) < 3, "skin dE " + m.skin); }

@@ -47,7 +47,8 @@ export async function startMockAnthropic() {
 }
 
 // envFile: ONLY for the manual paid test (real key loaded by wrangler from that file; never read or printed here).
-export async function startWorker({ turnstileSecret = TS.ALWAYS_PASS, anthropicUrl, envFile } = {}) {
+// vars: extra non-secret Worker vars (e.g. { VISION_MODEL: "claude-sonnet-5-5" } for a manual model comparison).
+export async function startWorker({ turnstileSecret = TS.ALWAYS_PASS, anthropicUrl, envFile, vars = {} } = {}) {
   const state = mkdtempSync(join(tmpdir(), "claqe-test-"));
   for (const f of [join(root, "schema.sql"), join(root, "test", "seed.sql")]) {
     const run = spawnSync(process.execPath, [wrangler, "d1", "execute", "DB", "--local", "--persist-to", state, "--file", f], { cwd: root, encoding: "utf8" });
@@ -59,6 +60,7 @@ export async function startWorker({ turnstileSecret = TS.ALWAYS_PASS, anthropicU
     "--var", "TURNSTILE_SECRET:" + turnstileSecret, "--var", "PASS_SECRET:local-test-pass-secret"];
   if (envFile) args.push("--env-file", envFile); else args.push("--var", "ANTHROPIC_API_KEY:mock-key-not-real");
   if (anthropicUrl) args.push("--var", "ANTHROPIC_API_URL:" + anthropicUrl);
+  for (const [k, v] of Object.entries(vars)) args.push("--var", k + ":" + v);
   const child = spawn(process.execPath, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   await new Promise((resolve, reject) => {

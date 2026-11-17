@@ -8,9 +8,66 @@ The working plan for `/claqe`. Claude updates it after every verified commit. Th
 |---|---|
 | Branch | `claude-development` (never `main`) |
 | Last verified commit | `57cf294`: phone validation procedure (pushed) + `/claqe` workflow setup (local) |
-| Last pushed commit | `32efdde` |
-| Last full test run | 2026-11-16 on `57cf294`: frontend 114/114, backend 64/64 (+5 guard unit tests added with the setup) |
-| Current milestone | **M8 Real phone footage validation** (Approved, blocked: waiting for the user's clips) |
+| Last pushed commit | `7bbb3ca` |
+| Last full test run | 2026-11-18 after the review fixes: frontend 127/127, backend 72/72 |
+| Current work | **Approved experiment (2026-11-18): editing intelligence + export quality** (below). M8: original-camera HDR/HEVC checks pending (not blocking) |
+
+## Approved experiment: editing intelligence, export quality, colour (2026-11-18)
+
+The user rejected both gym films (cuts random, tripod shake picked as action, cheap-filter colour, poor export). Local, non-paid fixes are done. A real AI test needs approval.
+
+**Root causes (measured on the 3 gym clips):**
+- **Editing:**
+  - Motion was measured on 96×54 frames squashed to 16:9, with whole-pixel camera tracking. The camera read zero in 97% of samples, so vibration, compression noise and passers-by all counted as subject action.
+  - Ranking within each clip inflated small motion.
+  - People and hands crossing the lens were the biggest changes, so they ranked as highlights and were even treated as scene cuts.
+  - Stacked variety penalties forced clip alternation onto empty frames.
+  - Semantic AI was never active (no API base or Turnstile key configured, `CLAQE_VISION` opt-in). It saw only 12 single stills, which can't separate setup, action and walk-off.
+- **Export:**
+  - 360×640 output, below the 464–576 px sources: an 8–12 dB loss.
+  - zoompan reset every frame: no zoom, only a soft resample (−27% detail).
+  - x264 ultrafast CRF 28 Baseline with deblocking off: visible 8×8 blocks (block-edge ratio 1.20–1.24).
+- **Colour:** the grade darkened by 4–7 levels and crushed shadows. The teal/orange split-tone made it look like a filter. Shot matching darkened a well-exposed clip. No colour tags.
+
+**Done (local, unit-tested; review fixes applied):**
+- **Analysis:**
+  - Block motion field on aspect-correct 128 px frames: a coarse global shift (±12 px), then per-block sub-pixel search. Camera and subject motion are separated.
+  - Jitter flag for vibration.
+  - Transient flag for something crossing the lens: not a highlight, not a cut.
+  - Motion scored mostly on absolute size.
+  - Planner quality floor and gentler variety penalties.
+- **Export:**
+  - Film size taken from the footage: the largest clip's short side, 360–720 px (540 max on phones and low-memory devices).
+  - zoompan removed.
+  - x264 veryfast CRF 21 High profile with BT.709 tags.
+  - The watermark scales with the film.
+- **Colour:**
+  - Tone curve (lutyuv) with black and white points pinned; the S-curve is faded out on dark shots.
+  - No split-tone. Dynamic uses vibrance instead of saturation.
+  - Exposure matching only outside 0.10–0.70 mean luma. Contrast and saturation matching only ever raise.
+  - Explicit BT.709 matrices around the RGB filters (no-op round trip: ΔE 0.02–0.07, against 0.5–1.4 before).
+  - **Bug found:** FFmpeg 5.1 `colorbalance` midtone terms (`rm`/`gm`/`bm`) are a no-op on every pixel format (measured; shadows and highlights work). Shot-to-shot white-balance matching had therefore never had any effect. It now uses `colorchannelmixer` channel gains (e2e: warm cast R−B 0.230 → 0.200), and Vintage's warmth moved to shadows and highlights.
+- **Semantic v2 ("timeline"):**
+  - One time-labelled contact sheet per clip. The model segments the whole clip into setup, action, peak, rest, ending, transition, handling or irrelevant, plus key moments. The planner never uses handling or irrelevant footage.
+  - Worker `/vision` accepts `version: 2` (`src/timeline.js`) with capped inputs and output, a priced-model-only `VISION_MODEL` dev override, and full accounting of budget overruns.
+  - Mock-tested only. `manual/real-timeline.mjs` does a free dry run, or one paid call per model with `CLAQE_CONFIRM_PAID=yes`.
+
+**Measured (gym clips, Edge on this PC):**
+
+| | Before | After |
+|---|---|---|
+| Output | 360×640 Baseline, ~0.9 Mb/s, untagged | 576×1024 High, ~1.7 Mb/s, BT.709 |
+| Block-edge ratio (source ≈ 1.01) | 1.20–1.24 | 1.04–1.08 |
+| PSNR vs source, grade included | 21–22 dB | 26–27 dB (SSIM 0.90) |
+| Cinematic ΔE vs source | 3.6 | 2.7 |
+| Render (30 s film) | ~57 s | ~145 s |
+| Peak browser memory | ~640–680 MB | ~745 MB |
+
+**Still open:**
+- **[needs approval: paid, about $0.11 for Haiku + Sonnet + Opus]** A real timeline-vision test on the gym clips, then AI-directed films.
+- Pacing that follows the action (cut on rep or phase boundaries) instead of fixed shot-length patterns.
+- An e2e test for the timeline path with a real render.
+- Measure 540p/720p memory on real phones (M13).
 
 ## Current approved milestone: M8 Real phone footage validation
 

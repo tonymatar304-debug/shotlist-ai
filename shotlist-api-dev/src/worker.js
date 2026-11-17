@@ -1,4 +1,6 @@
 import { EST_COST_VISION, VISION_MAX_BODY, validateVisionInput, validateVisionOutput, callVision } from "./vision.js";
+import { PRICES, EST_COST_TIMELINE, validateTimelineInput, validateTimelineOutput, callTimeline } from "./timeline.js";
+const TL_MAX_BODY = 1600000; // v2: up to 5 contact sheets of <= 300k base64 each
 const ALLOWED_ORIGIN = "https://claqe.com";
 const PASS_TTL_SECONDS = 60 * 60 * 24 * 30;
 const PASS_LIMIT = 30;
@@ -351,12 +353,17 @@ export default {
         const ipLimitRes = await checkAndIncrementLimit(env.DB, "ip:" + ipHash, IP_LIMIT);
         if (!ipLimitRes.allowed) return reply({ ok: false, code: "rate_limited", error: "Rate limit reached. Try again later." }, 429);
 
-        // Cost control: refuse oversized bodies before parsing them.
-        if (Number(request.headers.get("Content-Length") || 0) > VISION_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
+        // Cost control: refuse oversized bodies before parsing them (v2 contact sheets are larger than v1 frames).
+        if (Number(request.headers.get("Content-Length") || 0) > TL_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
         let text; try { text = await request.text(); } catch { return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400); }
-        if (text.length > VISION_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
+        if (text.length > TL_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
         let body; try { body = JSON.parse(text); } catch { return reply({ ok: false, code: "invalid_request", error: "Invalid request." }, 400); }
-        const input = validateVisionInput(body, { maxClips: FREE_MAX_CLIPS, maxClipSeconds: MAX_CLIP_SECONDS, maxTotalSeconds: MAX_TOTAL_SECONDS, maxFilmSeconds: FREE_MAX_SECONDS, styles: STYLES });
+        const v2 = body && body.request && body.request.version === 2;
+        if (!v2 && text.length > VISION_MAX_BODY) return reply({ ok: false, code: "invalid_request", error: "Request too large." }, 413);
+        const lim = { maxClips: FREE_MAX_CLIPS, maxClipSeconds: MAX_CLIP_SECONDS, maxTotalSeconds: MAX_TOTAL_SECONDS, maxFilmSeconds: FREE_MAX_SECONDS, styles: STYLES };
+        const input = v2 ? validateTimelineInput(body, lim) : validateVisionInput(body, lim);
+        // Model: production default; a local dev Worker may set VISION_MODEL to another PRICED model for comparison tests.
+        const vModel = v2 && env.VISION_MODEL && PRICES[env.VISION_MODEL] ? env.VISION_MODEL : MODEL, est = v2 ? EST_COST_TIMELINE[vModel] : EST_COST_VISION;
         if (input.error) return reply({ ok: false, code: "invalid_request", error: input.error }, 400);
 
         const user = await ensureUser(env.DB, pass.uid);
@@ -370,24 +377,26 @@ export default {
         if (!claim) return reply({ ok: false, code: "free_limit", error: "Free monthly limit reached." }, 429);
 
         const dPeriod = dailyPeriod(), mPeriod = monthlyPeriod();
-        const dOk = await reserve(env.DB, dPeriod, EST_COST_VISION, parseFloat(settings.daily_budget_usd || "0"));
+        const dOk = await reserve(env.DB, dPeriod, est, parseFloat(settings.daily_budget_usd || "0"));
         if (!dOk) { await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_daily", error: "Daily budget cap reached." }, 402); }
-        const mOk = await reserve(env.DB, mPeriod, EST_COST_VISION, parseFloat(settings.monthly_budget_usd || "0"));
-        if (!mOk) { await release(env.DB, dPeriod, EST_COST_VISION); await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
+        const mOk = await reserve(env.DB, mPeriod, est, parseFloat(settings.monthly_budget_usd || "0"));
+        if (!mOk) { await release(env.DB, dPeriod, est); await dropClaim(env.DB, claim); return reply({ ok: false, code: "budget_monthly", error: "Monthly budget cap reached." }, 402); }
 
         let result;
-        try { result = await callVision(env.ANTHROPIC_API_KEY, input.req, input.images, env.ANTHROPIC_API_URL, MODEL, ANTHROPIC_URL); }
+        try { result = v2 ? await callTimeline(env.ANTHROPIC_API_KEY, input.req, input.images, env.ANTHROPIC_API_URL, vModel, ANTHROPIC_URL) : await callVision(env.ANTHROPIC_API_KEY, input.req, input.images, env.ANTHROPIC_API_URL, MODEL, ANTHROPIC_URL); }
         catch (err) {
           console.error(err);
-          await release(env.DB, dPeriod, EST_COST_VISION); await release(env.DB, mPeriod, EST_COST_VISION); await dropClaim(env.DB, claim);
+          await release(env.DB, dPeriod, est); await release(env.DB, mPeriod, est); await dropClaim(env.DB, claim);
           return reply({ ok: false, code: "ai_unavailable", error: "The AI editor is temporarily unavailable. Please try again." }, 502);
         }
         const vIn = result.usage?.input_tokens || 0, vOut = result.usage?.output_tokens || 0;
-        const vCost = (vIn / 1e6) * 0.10 + (vOut / 1e6) * 0.50, vRefund = Math.max(0, EST_COST_VISION - vCost);
+        const [pIn, pOut] = PRICES[vModel] || [0.10, 0.50], vCost = (vIn / 1e6) * pIn + (vOut / 1e6) * pOut, vRefund = Math.max(0, est - vCost);
+        // A reply dearer than its reservation is still counted in full (the cap is checked on the next reservation).
+        if (vCost > est) for (const per of [dPeriod, mPeriod]) await env.DB.prepare("UPDATE budget_ledger SET used_usd = used_usd + ?, updated_at = ? WHERE period = ?").bind(vCost - est, Date.now(), per).run();
         await release(env.DB, dPeriod, vRefund); await release(env.DB, mPeriod, vRefund);
-        const vision = validateVisionOutput(result.parsed, input.req);
+        const vision = v2 ? validateTimelineOutput(result.parsed, input.req) : validateVisionOutput(result.parsed, input.req);
         // An unusable reply is logged (the cost is real) but does NOT use up the user's free edit (quota counts only 'ok'/'fallback').
-        await settleClaim(env.DB, claim, MODEL, vIn, vOut, vCost, vision ? "ok" : "bad_reply");
+        await settleClaim(env.DB, claim, vModel, vIn, vOut, vCost, vision ? "ok" : "bad_reply");
         if (!vision) await env.DB.prepare("UPDATE usage_log SET error = ? WHERE id = ?").bind(result.stop || (result.parsed ? "invalid_schema" : "invalid_json"), claim).run();
         if (!vision) return reply({ ok: false, code: "vision_unusable", error: "The AI reply could not be used." }, 502);
         return reply({ ok: true, vision, passUsage: `${passLimit.count}/${PASS_LIMIT}` });

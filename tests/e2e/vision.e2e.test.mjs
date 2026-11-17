@@ -16,7 +16,7 @@ before(async () => { web = staticServer(); port = await listen(web); browser = a
 after(async () => { await browser?.close(); web?.close(); });
 beforeEach(async () => {
   api = newApiState(); ctx = await browser.newContext(); await routeRealFfmpeg(ctx); await routeTurnstileStub(ctx); await routeApi(ctx, api);
-  await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_LIMITS = { filmSeconds: 7 }; });
+  await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_VISION_MODE = "frames"; window.CLAQE_LIMITS = { filmSeconds: 7 }; });
   page = await ctx.newPage();
 });
 afterEach(async () => { await ctx?.close(); });
@@ -54,7 +54,7 @@ test("a validated semantic reply steers the real export; the same footage with a
   assert.match(a.note, /a test card – static colour bars/);
 
   await ctx.close(); ctx = await browser.newContext(); await routeRealFfmpeg(ctx); await routeTurnstileStub(ctx); api = newApiState(); await routeApi(ctx, api);
-  await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_LIMITS = { filmSeconds: 7 }; }); page = await ctx.newPage();
+  await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_VISION_MODE = "frames"; window.CLAQE_LIMITS = { filmSeconds: 7 }; }); page = await ctx.newPage();
   api.vision = model((ci, t) => (ci === 0 && t > 10 ? { importance: 1, role: "highlight", subject: "a moving pattern", action: "numbers counting" } : { importance: 0.05, role: "filler" }));
   const b = await run(); const second = shots(b.note);
   assert.ok(secondsIn(second, 0, 10, 20) > secondsIn(second, 0, 0, 10), "reply favouring the busy half wins: " + b.note);
@@ -64,7 +64,7 @@ test("a validated semantic reply steers the real export; the same footage with a
 test("unusable or failed AI vision falls back to local analysis, honestly labelled", async () => {
   for (const reply of [[502, { ok: false, code: "vision_unusable" }], [502, { ok: false, code: "ai_unavailable" }], [200, { ok: true, vision: { version: 1, frames: [{ id: "zz", t: 1, importance: 1 }] } }]]) {
     ctx = await browser.newContext(); await routeRealFfmpeg(ctx); await routeTurnstileStub(ctx); api = newApiState(); await routeApi(ctx, api);
-    await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_LIMITS = { filmSeconds: 7 }; }); page = await ctx.newPage();
+    await ctx.addInitScript(() => { window.CLAQE_VISION = true; window.CLAQE_VISION_MODE = "frames"; window.CLAQE_LIMITS = { filmSeconds: 7 }; }); page = await ctx.newPage();
     api.vision = () => reply; const r = await run();
     assert.match(r.status, /Film ready/); assert.match(r.status, /not by AI/);
     assert.match(r.note, /^Footage-aware edit from local video analysis \(not AI\)/); assert.doesNotMatch(r.note, /AI-assisted/);

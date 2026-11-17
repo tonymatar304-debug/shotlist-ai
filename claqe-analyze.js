@@ -32,6 +32,65 @@
     }
     return { mad: base / 255, pan: Math.hypot(bx, by), resid: Math.min(best, base) / 255 };
   }
+  // Block motion field on an ASPECT-CORRECT grey frame pair (long side MS px). Each textured block finds its own best shift
+  // (integer search + parabolic sub-pixel refinement). The camera is the median block shift, so tripod vibration, hand shake
+  // and pans move every block alike and are NOT counted as subject motion. Subject motion = share of textured blocks that move
+  // differently from the camera x how far. change = share of blocks that no shift explains (new content: something passing
+  // close to the lens, a whip, a light change).
+  const MS = 128, MB = 12, MR = 3, GR = 12;
+  // Coarse global shift first (+-GR px, sparse whole-frame match, then +-1 refinement): blocks then search +-MR AROUND it,
+  // so a steady pan of up to ~15 px per sample pair (~45% of the frame per second) is tracked, not mistaken for an occluder.
+  function globalShift(a, b, w, h) {
+    const m = GR + 1, cost = (dx, dy) => { let e = 0, n = 0; for (let y = m; y < h - m; y += 3) for (let x = m; x < w - m; x += 3) { e += Math.abs(a[y * w + x] - b[(y + dy) * w + x + dx]); n++; } return n ? e / n : 0; };
+    const zero = cost(0, 0); let best = zero, gx = 0, gy = 0;
+    for (let dy = -GR; dy <= GR; dy += 2) for (let dx = -GR; dx <= GR; dx += 2) { const e = cost(dx, dy) + 0.05 * (Math.abs(dx) + Math.abs(dy)); if (e < best) { best = e; gx = dx; gy = dy; } }
+    const cx = gx, cy = gy;
+    for (let dy = cy - 1; dy <= cy + 1; dy++) for (let dx = cx - 1; dx <= cx + 1; dx++) if (Math.abs(dx) <= GR && Math.abs(dy) <= GR) { const e = cost(dx, dy) + 0.05 * (Math.abs(dx) + Math.abs(dy)); if (e < best) { best = e; gx = dx; gy = dy; } }
+    // Repetitive patterns (racks, fences, tiles) match at false offsets: a coarse shift must clearly beat no shift, and small
+    // moves are left to the fine block search anyway.
+    return best < 0.8 * zero && Math.hypot(gx, gy) > 2 ? [gx, gy] : [0, 0];
+  }
+  function motionField(a, b, w, h) {
+    let madSum = 0; for (let i = 0; i < a.length; i++) madSum += Math.abs(a[i] - b[i]);
+    const mad = madSum / a.length / 255, vecs = [], n = MB * MB, [gx, gy] = globalShift(a, b, w, h);
+    for (let by = MR + 1; by + MB + MR + 1 <= h; by += MB) for (let bx = MR + 1; bx + MB + MR + 1 <= w; bx += MB) {
+      if (bx + gx - MR < 0 || bx + gx + MB + MR > w || by + gy - MR < 0 || by + gy + MB + MR > h) continue; // block leaves the frame at this pan
+      let s = 0, s2 = 0;
+      for (let y = by; y < by + MB; y++) for (let x = bx; x < bx + MB; x++) { const v = a[y * w + x]; s += v; s2 += v * v; }
+      const sd = Math.sqrt(Math.max(0, s2 / n - (s / n) ** 2));
+      const sad = (dx, dy) => { let e = 0; for (let y = by; y < by + MB; y++) for (let x = bx; x < bx + MB; x++) e += Math.abs(a[y * w + x] - b[(y + dy + gy) * w + x + dx + gx]); return e / n; };
+      let best = Infinity, ox = 0, oy = 0;
+      for (let dy = -MR; dy <= MR; dy++) for (let dx = -MR; dx <= MR; dx++) { const e = sad(dx, dy) + 0.01 * (Math.abs(dx) + Math.abs(dy)); if (e < best) { best = e; ox = dx; oy = dy; } }
+      const sub = (m, z, p) => { const d = m - 2 * z + p; return d > 1e-9 ? clamp(0.5 * (m - p) / d, -0.5, 0.5) : 0; };
+      const e0 = sad(ox, oy);
+      const fx = Math.abs(ox) < MR ? ox + sub(sad(ox - 1, oy), e0, sad(ox + 1, oy)) : ox, fy = Math.abs(oy) < MR ? oy + sub(sad(ox, oy - 1), e0, sad(ox, oy + 1)) : oy;
+      vecs.push({ x: fx + gx, y: fy + gy, sd, err: e0 });
+    }
+    const tex = vecs.filter((v) => v.sd >= 6);
+    if (tex.length < 4) return { mad, pan: 0, resid: mad, change: 0, cam: [0, 0] };
+    const med = (arr) => { const o = arr.slice().sort((p, q) => p - q), k = o.length >> 1; return o.length % 2 ? o[k] : (o[k - 1] + o[k]) / 2; };
+    const cx = med(tex.map((v) => v.x)), cy = med(tex.map((v) => v.y));
+    const dev = tex.map((v) => Math.hypot(v.x - cx, v.y - cy)), moving = dev.filter((d) => d > 1);
+    const changed = tex.filter((v) => v.err > Math.max(14, 0.45 * v.sd)).length / tex.length;
+    const area = moving.length / tex.length, mag = moving.length ? med(moving) : 0;
+    return { mad, pan: Math.hypot(cx, cy), resid: area * clamp(mag / 3), change: changed, cam: [Math.round(cx * 100) / 100, Math.round(cy * 100) / 100] };
+  }
+  const motionSize = (vw, vh) => (vw >= vh ? [MS, Math.max(16, Math.round(MS * vh / vw))] : [Math.max(16, Math.round(MS * vw / vh)), MS]);
+  // Per-clip pass after sampling: (1) jitter = small camera shifts whose direction doesn't persist (vibration, unsteady hands),
+  // unlike a deliberate pan; (2) transient = a sample unlike BOTH neighbours while they resemble each other (a hand, a passer-by
+  // or the operator crossing the lens): not a scene cut and not a highlight.
+  function markTemporal(S) {
+    S.forEach((s, i) => {
+      const p = S[i - 1], q = S[i + 1];
+      if (s.cam) {
+        const same = (o) => o && o.cam && (o.cam[0] * s.cam[0] + o.cam[1] * s.cam[1]) > 0.5 * s.pan * s.pan;
+        s.jitter = s.pan > 0.25 && s.pan < 3 && !same(p) && !same(q) ? Math.round(clamp(s.pan / 1.5) * 100) / 100 : 0;
+      }
+      s.transient = !!(p && q && sceneDistance(p, s) > SCENE_T * 0.6 && sceneDistance(s, q) > SCENE_T * 0.6 && sceneDistance(p, q) < 0.5 * Math.min(sceneDistance(p, s), sceneDistance(s, q)))
+        || (s.change !== undefined && s.change >= 0.5 && s.pan < GR); // beyond the tracked range, "change" is just a fast pan
+    });
+    return S;
+  }
   function down(g, w = W, h = H) { // 96x54 -> 32x18 box average
     const t = new Uint8Array(TW * TH), fx = w / TW, fy = h / TH;
     for (let y = 0; y < TH; y++) for (let x = 0; x < TW; x++) {
@@ -41,10 +100,11 @@
   }
   // One time sample from frames at t (g0) and t+dt (g1, optional).
   // col (optional): { rgb: [mean R, G, B] 0..1, sat: mean (max-min) 0..1 } of the colour frame, used for grading.
-  function featurize(t, g0, g1, col) {
-    const s = stats(g0); const m = g1 ? pairMotion(g0, g1) : { mad: 0, pan: 0, resid: 0 };
+  // mo (optional): { a, b, w, h } aspect-correct motion frames -> block motion field (camera vs subject); else legacy pairMotion.
+  function featurize(t, g0, g1, col, mo) {
+    const s = stats(g0); const m = mo && mo.b ? motionField(mo.a, mo.b, mo.w, mo.h) : g1 ? pairMotion(g0, g1) : { mad: 0, pan: 0, resid: 0 };
     return { t: Math.round(t * 100) / 100, bright: s.bright, contrast: s.contrast, sharp: s.sharp, hist: s.hist, tiny: Array.from(down(g0)), motion: m.mad, pan: m.pan, resid: m.resid, scene: 0,
-      ...(col ? { rgb: col.rgb, sat: col.sat } : {}) };
+      ...(m.cam ? { cam: m.cam, change: Math.round(m.change * 100) / 100 } : {}), ...(col ? { rgb: col.rgb, sat: col.sat } : {}) };
   }
   function colourStats(d) { // RGBA bytes
     let r = 0, g = 0, b = 0, s = 0; const n = d.length / 4;
@@ -58,7 +118,7 @@
     let d = 0; for (let i = 0; i < a.tiny.length; i++) d += Math.abs(a.tiny[i] - b.tiny[i]);
     return 0.5 * (h / 2) + 0.5 * (d / a.tiny.length / 255);
   }
-  function linkScenes(samples) { samples.forEach((s, i) => { s.scene = i ? sceneDistance(samples[i - 1], s) : 0; }); return samples; }
+  function linkScenes(samples) { samples.forEach((s, i) => { s.scene = i ? sceneDistance(samples[i - 1], s) : 0; }); return markTemporal(samples); }
 
   // ---------- derived per-clip timeline ----------
   const STYLE_WEIGHTS = {
@@ -77,22 +137,25 @@
     const mean = new Array(BINS).fill(0); S.forEach((s) => s.hist.forEach((v, i) => (mean[i] += v / n)));
     const novelty = rank(S.map((s) => s.hist.reduce((a, v, i) => a + Math.abs(v - mean[i]), 0)));
     // Motion blends rank-within-clip with ABSOLUTE size, so a clip where nothing happens can't out-score one with real action.
-    const sharpR = rank(S.map((s) => s.sharp)), motionR = rank(S.map((s) => s.resid)).map((r, i) => 0.5 * r + 0.5 * clamp(S[i].resid / 0.08)), energyR = rank(S.map((s) => s.motion)).map((r, i) => 0.5 * r + 0.5 * clamp(S[i].motion / 0.15));
+    // Mostly ABSOLUTE (0.75): ranking within a clip made a clip's small background motion look like its "action".
+    // Energy uses subject motion when the motion field exists (whole-frame change also counts vibration and occlusions).
+    const energyOf = (s) => (s.cam ? s.resid : s.motion);
+    const sharpR = rank(S.map((s) => s.sharp)), motionR = rank(S.map((s) => s.resid)).map((r, i) => 0.25 * r + 0.75 * clamp(S[i].resid / 0.08)), energyR = rank(S.map(energyOf)).map((r, i) => 0.25 * r + 0.75 * clamp(energyOf(S[i]) / 0.15));
     S.forEach((s, i) => {
       const exposure = (s.bright < 0.06 || s.bright > 0.96 ? 0.2 : 1) * clamp(1 - Math.abs(s.bright - 0.5) / 0.5) ** 0.5;
       const flat = s.sharp < 1e-6 && s.contrast < 0.02 ? 0.3 : 1;                    // featureless frame (cap, black, fade)
-      const pan = clamp(s.pan / 4), shake = pan * (1 - sharpR[i]) * clamp(s.resid * 8);  // fast shift + blur + chaos
-      const camera = pan * (1 - shake) * (1 - clamp(s.resid * 6)) * 0.8 + (1 - pan) * 0.4; // deliberate move or steady hold
-      const sc = (w.exposure * exposure + w.sharp * sharpR[i] * flat + w.motion * motionR[i] + w.energy * energyR[i] + w.novelty * novelty[i] + w.camera * camera) * flat - 0.25 * shake;
+      const jitter = s.jitter || 0, pan = clamp(s.pan / 4) * (1 - jitter), shake = Math.max(clamp(s.pan / 4) * (1 - sharpR[i]) * clamp(s.resid * 8), 0.5 * jitter); // fast shift + blur + chaos, or vibration
+      const camera = pan * (1 - shake) * (1 - clamp(s.resid * 6)) * 0.8 + (1 - clamp(s.pan / 4)) * 0.4 * (1 - jitter); // deliberate move or steady hold
+      const sc = ((w.exposure * exposure + w.sharp * sharpR[i] * flat + w.motion * motionR[i] + w.energy * energyR[i] + w.novelty * novelty[i] + w.camera * camera) * flat - 0.25 * shake) * (s.transient ? 0.25 : 1);
       s.interest = clamp(sc);
       // Optional semantic judgement from ClaqeVision.applyVision (model output, validated): blends with, never replaces, the local score.
       if (s.sem) s.interest = s.sem.avoid ? s.interest * 0.15 : clamp(s.interest * (1 - 0.5 * s.sem.w) + s.sem.importance * 0.5 * s.sem.w + (s.sem.must ? 0.12 * s.sem.w : 0));
-      s.traits = { exposure, sharpR: sharpR[i], motion: motionR[i], novelty: novelty[i], camera, shake };
+      s.traits = { exposure, sharpR: sharpR[i], motion: motionR[i], novelty: novelty[i], camera, shake, transient: !!s.transient };
     });
     return clip;
   }
   // A cut is a LOCAL MAXIMUM of visual change above the threshold (fast motion raises several neighbours; only the peak is a cut).
-  function isCut(S, i) { const d = S[i].scene; return d > SCENE_T && d >= S[i - 1].scene && (i + 1 >= S.length || d > S[i + 1].scene); }
+  function isCut(S, i) { const d = S[i].scene; return !S[i].transient && !S[i - 1].transient && d > SCENE_T && d >= S[i - 1].scene && (i + 1 >= S.length || d > S[i + 1].scene); }
   function sceneRanges(clip) { // [{start,end}] split at detected cuts
     const S = clip.samples, cuts = [0]; S.forEach((s, i) => { if (i && isCut(S, i)) cuts.push((S[i - 1].t + s.t) / 2); });
     cuts.push(clip.duration); const out = [];
@@ -116,7 +179,9 @@
         const ws = windowStats(clip, a, a + L);
         // never a shot of (near) black: fades to black, end credits on black, lens cap
         if (clip.samples.filter((s) => s.t >= a - 0.25 && s.t <= a + L + 0.25).every((s) => s.bright < 0.06)) continue;
-        out.push({ start: r1(a), duration: r1(L), score: ws.score * 0.8 + ws.peak * 0.2 + (a === a0 && sc.start > 0 ? 0.04 : 0), rep: ws.rep });
+        // something crossing the lens inside the window spoils the shot (generic: hands, passers-by, the operator)
+        const spoiled = clip.samples.some((s) => s.transient && s.t >= a - 0.25 && s.t <= a + L + 0.25) ? 0.5 : 1;
+        out.push({ start: r1(a), duration: r1(L), score: (ws.score * 0.8 + ws.peak * 0.2 + (a === a0 && sc.start > 0 ? 0.04 : 0)) * spoiled, rep: ws.rep });
       }
     }
     return out;
@@ -245,13 +310,22 @@
       let best = null;
       // if nothing of the paced length fits any more, try shorter shots before ending the film early
       for (const lens_k of [lensK0, lensK0 * 0.6, 2, 1.2].filter((x, i) => i === 0 || (x < lensK0 - 0.05 && x >= 1.2))) {
-      for (let ci = 0; ci < clips.length; ci++) for (const c of findRanges(clips[ci], style, lens_k)) {
+      // Quality floor: a window far below the best footage still available is never used just to vary the clips
+      // (that put empty frames and camera handling into fast-cut films). Applies only while better footage remains.
+      const pool = []; for (let ci = 0; ci < clips.length; ci++) for (const c of findRanges(clips[ci], style, lens_k)) pool.push([ci, c]);
+      const free = pool.filter(([ci, c]) => !chosen.some((x) => x.src === ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5));
+      const floor = 0.6 * Math.max(0, ...free.map(([, c]) => c.score));
+      for (const [ci, c] of pool) {
+        if (c.score < floor) continue;
         const hit = chosen.some((x) => x.src === ci && c.start < x.start + x.duration + 0.5 && c.start + c.duration > x.start - 0.5);
         if (hit) continue;
         // a confidently AI-rejected moment (title card, unusable frame) is never used; the rest of that clip still is
         if (clips[ci].samples.some((s) => s.sem && s.sem.avoid && s.sem.w > 0.6 && s.t >= c.start && s.t <= c.start + c.duration)) continue;
-        let sc = c.score / (1 + 0.1 * count[ci]);
-        for (const x of chosen) if (histDist(c.rep.hist, x.rep.hist) < 0.08) sc -= 0.06; // near-duplicate look
+        // Gentle variety: a mild per-clip repeat penalty and a CAPPED near-duplicate penalty (stacked penalties forced
+        // clip alternation onto weak footage).
+        let sc = c.score / (1 + 0.05 * count[ci]), dup = 0;
+        for (const x of chosen) if (histDist(c.rep.hist, x.rep.hist) < 0.08) dup += 0.03;
+        sc -= Math.min(0.09, dup);
         if (c.duration < lens_k - 0.05) sc *= 0.8 + 0.2 * (c.duration / lens_k);       // scene shorter than the slot
         if (!best || sc > best.sc + 1e-9) best = { ...c, src: ci, sc };
       }
@@ -271,16 +345,20 @@
     const video = document.createElement("video"), url = URL.createObjectURL(file);
     const canvas = document.createElement("canvas"); canvas.width = W; canvas.height = H;
     const g = canvas.getContext("2d", { willReadFrequently: true });
+    const mcanvas = document.createElement("canvas"), mg = mcanvas.getContext("2d", { willReadFrequently: true });
     video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = url;
     try {
       await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("video did not load")), 15000); video.onloadeddata = () => { clearTimeout(to); res(); }; video.onerror = () => { clearTimeout(to); rej(new Error("video cannot be decoded")); }; });
       // No picture decoder in this browser (e.g. HEVC without hardware support, ProRes): it still "loads" the sound and
       // duration but every frame is blank, which would silently drop the clip. Fail so the caller can fall back.
       if (!video.videoWidth) throw new Error("this browser cannot decode the clip's picture");
+      const [mw, mh] = motionSize(video.videoWidth, video.videoHeight); mcanvas.width = mw; mcanvas.height = mh;
+      const greyOf = (d, len) => { const o = new Uint8Array(len); for (let i = 0; i < len; i++) o[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; return o; };
       const seek = (t) => new Promise((res, rej) => { const to = setTimeout(() => rej(new Error("seek timeout")), 8000); video.onseeked = () => { clearTimeout(to); res(); }; video.currentTime = Math.min(Math.max(0, t), Math.max(0, duration - 0.05)); });
       const grab = async (t) => { await seek(t); await new Promise((r) => requestAnimationFrame(() => r())); g.drawImage(video, 0, 0, W, H);
-        const d = g.getImageData(0, 0, W, H).data, o = new Uint8Array(W * H); for (let i = 0; i < o.length; i++) o[i] = (d[i * 4] * 77 + d[i * 4 + 1] * 150 + d[i * 4 + 2] * 29) >> 8; o.col = colourStats(d); return o; };
-      const sampleAt = async (t) => { const a = await grab(t); const b = t + MOTION_DT < duration - 0.05 ? await grab(t + MOTION_DT) : null; const s = featurize(t, a, b, a.col); if (onSample) onSample(s); return s; };
+        const d = g.getImageData(0, 0, W, H).data, o = greyOf(d, W * H); o.col = colourStats(d);
+        mg.drawImage(video, 0, 0, mw, mh); o.mo = greyOf(mg.getImageData(0, 0, mw, mh).data, mw * mh); return o; };
+      const sampleAt = async (t) => { const a = await grab(t); const b = t + MOTION_DT < duration - 0.05 ? await grab(t + MOTION_DT) : null; const s = featurize(t, a, b, a.col, { a: a.mo, b: b && b.mo, w: mw, h: mh }); if (onSample) onSample(s); return s; };
       const samples = [];
       for (let t = step / 2; t < duration - 0.1; t += step) { if (signal && signal.aborted) throw new Error("cancelled"); samples.push(await sampleAt(t)); }
       if (!samples.length) samples.push(await sampleAt(Math.max(0, duration / 2)));
@@ -292,5 +370,5 @@
     } finally { video.removeAttribute("src"); try { video.load(); } catch (_) {} URL.revokeObjectURL(url); }
   }
 
-  return { analyzeClip, planFilm, orderShots, clipStory, findRanges, scoreClip, sceneRanges, shotLengths, featurize, colourStats, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
+  return { analyzeClip, motionField, motionSize, markTemporal, planFilm, orderShots, clipStory, findRanges, scoreClip, sceneRanges, shotLengths, featurize, colourStats, stats, pairMotion, sceneDistance, linkScenes, W, H, SCENE_T };
 });
