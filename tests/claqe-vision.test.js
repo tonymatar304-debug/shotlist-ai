@@ -109,3 +109,14 @@ test("timeline drives the edit: walk-to-camera (most motion) and camera handling
   assert.ok(covers(p, 1, 18, 24), "the peak is in the film");
   assert.ok(p.plan.filter((x) => x.reason && /mock (action|peak|setup)/.test(x.reason)).length >= p.plan.length - 1, "reasons come from the model's segments");
 });
+
+test("timeline: only moments the model rates >= 0.6 seed the edit; moments in handling footage never do", () => {
+  const cs = [lift(39, 33), lift(36, 30)];
+  const req = V.buildTimelineRequest(cs, { style: "cinematic", filmSeconds: 20 });
+  const reply = V.mockTimeline(req, { 0: [[0, 33, "action", 0.7], [33, 39, "ending", 0.4]], 1: [[0, 30, "action", 0.7], [30, 36, "handling", 0]] });
+  reply.clips[0].moments = [{ t: 20, what: "strong rep", importance: 0.8 }, { t: 36.5, what: "walks toward the camera", importance: 0.4 }];
+  reply.clips[1].moments = [{ t: 33, what: "approaches camera", importance: 0.9 }];
+  V.applyTimeline(cs, V.validateTimelineResponse(reply, req));
+  assert.deepEqual(cs[0].vision.filter((v) => v.role === "highlight").map((v) => v.t), [20]);
+  assert.equal(cs[1].vision.filter((v) => v.role === "highlight").length, 0);
+});

@@ -220,7 +220,8 @@
       }
       // Key moments (and a confident setup/ending) seed the plan; only inside usable segments.
       const usable = (t) => { const g = c.segments.find((x) => t >= x.start && t < x.end); return g && !PHASE_RULE[g.phase].avoid && g.quality >= 0.25 ? g : null; };
-      for (const m of c.moments) { const g = usable(m.t); if (g) clip.vision.push({ t: m.t, role: "highlight", importance: Math.max(m.importance, 0.6), confidence: 0.85 }); }
+      // Only moments the model itself rates important seed the edit (a "walks toward the camera" moment at 0.4 must not).
+      for (const m of c.moments) { const g = usable(m.t); if (g && m.importance >= 0.6) clip.vision.push({ t: m.t, role: "highlight", importance: m.importance, confidence: 0.85 }); }
       for (const g of c.segments) if ((g.phase === "setup" || g.phase === "ending") && g.importance >= 0.5 && g.quality >= 0.5)
         clip.vision.push({ t: Math.round(((g.start + g.end) / 2) * 10) / 10, role: PHASE_RULE[g.phase].role, importance: g.importance, confidence: 0.75 });
     }

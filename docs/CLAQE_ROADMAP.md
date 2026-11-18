@@ -63,8 +63,37 @@ The user rejected both gym films (cuts random, tripod shake picked as action, ch
 | Render (30 s film) | ~57 s | ~145 s |
 | Peak browser memory | ~640–680 MB | ~745 MB |
 
+**Real timeline-vision comparison (2026-11-18, approved one-time test, $0.50 cap):**
+- One request per model, same 3 contact sheets (28/20/18 tiles, ~4,650 input tokens).
+- Total **$0.0654**:
+
+| Model | Cost | Time | Output tokens |
+|---|---|---|---|
+| Haiku 5.5 | $0.0010 | 25.6 s | 1,152 |
+| Sonnet 5.5 | $0.0185 | 12.8 s | 920 |
+| Opus 5.5 | $0.0458 | 19.2 s | 1,361 |
+
+- The runner enforces a hard cap (`CLAQE_MAX_USD`; worst case checked before every request; failed calls counted at worst case).
+
+**Segmentation accuracy (checked against the contact sheets):**
+- **Opus:** flagged the passer-by, the empty frames, the hand at 46 s and both walk-offs as handling or irrelevant.
+- **Sonnet:** coarser. It missed the passer-by and called the walk-to-camera an "ending".
+- **Haiku:** labelled standing up and walking off as the "peak" and misread the exercise.
+
+**AI-directed films** (replayed from the saved replies through the real app; no extra calls):
+
+| Model | Bad shots (handling, walk-in/off) | Render time |
+|---|---|---|
+| Opus | 0/6 Cinematic, 0/16 Dynamic | 128–134 s |
+| Sonnet | 0/6 Cinematic, 3–4/16 Dynamic | 121–141 s |
+| Haiku | 1/6 Cinematic, 3/16 Dynamic | 140–148 s |
+
+- Peak browser memory 770–845 MB.
+- Planner fix from the test: only model moments rated ≥ 0.6 seed the edit (a "walks toward the camera" moment rated 0.4 had been promoted to a highlight).
+- The user judges creative quality. Decisions are relevant now, but pacing still follows fixed shot-length patterns, and the Opus Dynamic edit is 16 rep shots with no setup or finish arc.
+
 **Still open:**
-- **[needs approval: paid, about $0.11 for Haiku + Sonnet + Opus]** A real timeline-vision test on the gym clips, then AI-directed films.
+- Choose the production vision model. Opus decided best; Haiku is ~45× cheaper but made wrong calls. Decide after the user's review.
 - Pacing that follows the action (cut on rep or phase boundaries) instead of fixed shot-length patterns.
 - An e2e test for the timeline path with a real render.
 - Measure 540p/720p memory on real phones (M13).

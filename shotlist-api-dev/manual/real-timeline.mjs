@@ -22,6 +22,10 @@ const MODELS = (process.env.MODELS || "claude-haiku-5-5").split(",").filter(Bool
 if (clips.length < 2) { console.error("usage: node manual/real-timeline.mjs <clipA> <clipB> [...]"); process.exit(2); }
 for (const m of MODELS) if (!PRICES[m]) { console.error("unknown or unpriced model: " + m); process.exit(2); }
 const paid = process.env.CLAQE_CONFIRM_PAID === "yes";
+// Hard spend cap for the whole run (USD). Before each model: spent so far + that model's WORST case (input x2 margin, full
+// output cap) must fit, otherwise the run stops. One request per model, no retries.
+const MAX_USD = Number(process.env.CLAQE_MAX_USD || 0);
+if (paid && !(MAX_USD > 0)) { console.error("set CLAQE_MAX_USD (the approved spend cap) for a paid run"); process.exit(2); }
 if (paid && !(process.env.CLAQE_ENV_FILE && fs.existsSync(process.env.CLAQE_ENV_FILE))) { console.error("CLAQE_ENV_FILE must point to an existing env file"); process.exit(2); }
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -52,14 +56,21 @@ if (!paid) { console.log("\nDRY RUN: no request sent. Set CLAQE_CONFIRM_PAID=yes
 
 // 2) One real call per model through the local Worker (real /vision v2 code path). Replies are saved for free replays.
 let total = 0;
+const worst = (m) => { const [pi, po] = PRICES[m], maxOut = /haiku/.test(m) ? TL_MAX_TOKENS : TL_MAX_TOKENS * 3; return (estIn * 2 * pi + maxOut * po) / 1e6; };
+const plannedWorst = MODELS.reduce((a, m) => a + worst(m), 0);
+console.log(`
+spend cap ${MAX_USD.toFixed(2)}; planned worst case for ${MODELS.length} request(s): ${plannedWorst.toFixed(4)}`);
+if (plannedWorst > MAX_USD) { console.error("planned worst case exceeds the cap: nothing sent"); process.exit(3); }
 for (const model of MODELS) {
+  if (total + worst(model) > MAX_USD) { console.error(`stop before ${model}: spent ${total.toFixed(4)} + worst ${worst(model).toFixed(4)} > cap`); break; }
   const w = await startWorker({ turnstileSecret: TS.ALWAYS_PASS, envFile: process.env.CLAQE_ENV_FILE, vars: { VISION_MODEL: model } });
   try {
     const c = client(w.base);
     if ((await c.call("/pass", { method: "POST", json: { turnstileToken: TS.TOKEN } })).status !== 200) throw new Error("pass failed");
     const t0 = Date.now(), r = await c.call("/vision", { method: "POST", json: { request: prep.request, images: prep.images } });
-    const [row] = w.sql("SELECT model, input_tokens, output_tokens, cost_usd, status, error FROM usage_log ORDER BY id DESC LIMIT 1");
-    total += row.cost_usd || 0;
+    const [row = {}] = w.sql("SELECT model, input_tokens, output_tokens, cost_usd, status, error FROM usage_log ORDER BY id DESC LIMIT 1");
+    // A failed call is counted at its worst case (conservative: the cap must hold even if a failed request was billed).
+    total += r.status === 200 || row.cost_usd ? row.cost_usd || 0 : worst(model);
     console.log(`\n${model}: /vision -> ${r.status} in ${((Date.now() - t0) / 1000).toFixed(1)} s ${r.data.code || ""} | tokens in ${row.input_tokens} out ${row.output_tokens} | $${(row.cost_usd || 0).toFixed(4)} | ${row.status} ${row.error || ""}`);
     if (r.status !== 200) continue;
     const v = V.validateTimelineResponse(r.data.vision, prep.request);
